@@ -1246,7 +1246,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                     }
 
                     combinedEntries.AddRange(allEntries);
-                    GenerateBuildInputDefinitions(allEntries, bundleInputDefs, CalculateGroupHash(namingMode, assetGroup, allEntries), "all", ignoreUnsupportedFilesInBuild);
+                    GenerateBuildInputDefinitions(allEntries, bundleInputDefs, CalculateGroupHash(namingMode, assetGroup, allEntries), null, ignoreUnsupportedFilesInBuild);
                 }
                 break;
                 case BundledAssetGroupSchema.BundlePackingMode.PackSeparately:
@@ -1318,9 +1318,27 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
             }
 
             if (assets.Count > 0)
-                buildInputDefs.Add(GenerateBuildInputDefinition(assets, groupGuid + "_assets_" + address + ".bundle"));
+            {
+                if (string.IsNullOrEmpty(address))
+                {
+                    buildInputDefs.Add(GenerateBuildInputDefinition(assets, groupGuid + ".bundle"));
+                }
+                else
+                {
+                    buildInputDefs.Add(GenerateBuildInputDefinition(assets, groupGuid + "_" + address + ".bundle"));
+                }
+            }
             if (scenes.Count > 0)
-                buildInputDefs.Add(GenerateBuildInputDefinition(scenes, groupGuid + "_scenes_" + address + ".bundle"));
+            {
+                if (string.IsNullOrEmpty(address))
+                {
+                    buildInputDefs.Add(GenerateBuildInputDefinition(scenes, groupGuid + ".bundle"));
+                }
+                else
+                {
+                    buildInputDefs.Add(GenerateBuildInputDefinition(scenes, groupGuid + "_" + address + ".bundle"));
+                }
+            }
         }
 
         private static void ThrowExceptionIfInvalidFiletypeOrAddress(AddressableAssetEntry entry, bool ignoreUnsupportedFilesInBuild)
@@ -1482,8 +1500,10 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                     bundleResultInfo.Crc = info.Crc;
                     bundleResultInfo.Hash = info.Hash.ToString();
                     var bundleName = Path.GetFileNameWithoutExtension(info.FileName);
+#if !UNITY_WEBGL
                     if (!schema.StripDownloadOptions)
                     {
+#endif
                         dataEntry.Data = new AssetBundleRequestOptions
                         {
                             Crc = schema.UseAssetBundleCrc ? info.Crc : 0,
@@ -1499,7 +1519,9 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                             BundleSize = GetFileSize(info.FileName),
                             ClearOtherCachedVersionsWhenLoaded = schema.AssetBundledCacheClearBehavior == BundledAssetGroupSchema.CacheClearBehavior.ClearWhenWhenNewVersionLoaded
                         };
+#if !UNITY_WEBGL
                     }
+#endif
                     bundleResultInfo.InternalBundleName = bundleName;
 
                     if (assetGroup == sharedBundleGroup && info.Dependencies.Length == 0 && !string.IsNullOrEmpty(info.FileName) &&
