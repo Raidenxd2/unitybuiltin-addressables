@@ -826,7 +826,12 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             /// <summary>
             /// Use to indicate that the bundle name should only contain the hash of the file name.
             /// </summary>
-            FileNameHash
+            FileNameHash,
+            
+            /// <summary>
+            /// Same as FileNameHash except only 4 characters
+            /// </summary>
+            Short
         }
 
         /// <summary>

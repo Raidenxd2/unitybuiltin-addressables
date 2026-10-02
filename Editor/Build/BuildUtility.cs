@@ -66,6 +66,13 @@ namespace UnityEditor.AddressableAssets.Build
                 case BundledAssetGroupSchema.BundleNamingStyle.FileNameHash:
                     result = HashingMethods.Calculate(result) + ".bundle";
                     break;
+                case BundledAssetGroupSchema.BundleNamingStyle.Short:
+#if !UNITY_WEBGL
+                    result = HashingMethods.Calculate(result).ToString().Substring(0, 4);
+#else
+                    result = HashingMethods.Calculate(result).ToString().Substring(0, 4) + ".bundle";
+#endif
+                    break;
             }
 
             return result;
