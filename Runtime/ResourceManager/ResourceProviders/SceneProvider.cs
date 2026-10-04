@@ -1,20 +1,20 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using UnityEngine.Assertions.Must;
-using UnityEngine.ResourceManagement;
 using UnityEngine.ResourceManagement.AsyncOperations;
 using UnityEngine.ResourceManagement.ResourceLocations;
-using UnityEngine.ResourceManagement.Util;
 using UnityEngine.SceneManagement;
+
+#if ENABLE_CONTENT_DIRECTORIES
+using Unity.Loading;
+#endif
 
 namespace UnityEngine.ResourceManagement.ResourceProviders
 {
     /// <summary>
     /// Implementation if ISceneProvider
     /// </summary>
-    public class SceneProvider : ISceneProvider2
+    internal class SceneProvider : ISceneProvider
     {
         class SceneOp : AsyncOperationBase<SceneInstance>, IUpdateReceiver
         {
@@ -26,9 +26,9 @@ namespace UnityEngine.ResourceManagement.ResourceProviders
             int m_Priority;
             private AsyncOperationHandle<IList<AsyncOperationHandle>> m_DepOp;
             ResourceManager m_ResourceManager;
-            ISceneProvider2 m_provider;
+            ISceneProvider m_provider;
 
-            public SceneOp(ResourceManager rm, ISceneProvider2 provider)
+            public SceneOp(ResourceManager rm, ISceneProvider provider)
             {
                 m_ResourceManager = rm;
                 m_provider = provider;
@@ -101,19 +101,54 @@ namespace UnityEngine.ResourceManagement.ResourceProviders
             protected override void Execute()
             {
                 var loadingFromBundle = false;
+
                 if (m_DepOp.IsValid())
                 {
                     foreach (var d in m_DepOp.Result)
                     {
                         var abResource = d.Result as IAssetBundleResource;
                         if (abResource != null && abResource.GetAssetBundle() != null)
+                        {
                             loadingFromBundle = true;
+                            break;
+                        }
                     }
                 }
 
+#if ENABLE_CONTENT_DIRECTORIES
+                var contentDirectoryData = m_Location.Data as ContentDirectoryAssetData;
+#endif
+
                 if (!m_DepOp.IsValid() || m_DepOp.OperationException == null)
                 {
-                    m_Inst = InternalLoadScene(m_Location, loadingFromBundle, m_LoadSceneParameters, m_ActivateOnLoad, m_Priority);
+#if ENABLE_CONTENT_DIRECTORIES
+                    if (contentDirectoryData != null)
+                    {
+                        // Mount the Content Directory directly from the load path embedded in the
+                        // catalog entry data. The mount stays registered until AddressablesImpl.Dispose.
+                        var cdHandle = ContentDirectoryMountManager.EnsureMounted(contentDirectoryData.LoadPath);
+
+                        var globalRootAsset = ContentDirectoryMountManager.GetRootAsset(cdHandle);
+                        if (globalRootAsset == null)
+                            throw new Exception($"Content Directory scene load failed: no AddressableRootAsset found for address '{m_Location.PrimaryKey}'.");
+
+                        var scene = globalRootAsset.GetLoadableSceneId(contentDirectoryData.SceneId);
+                        if (scene == default)
+                        {
+                            string reason = !contentDirectoryData.IsSceneIdValid
+                                ? "the catalog entry is not a scene"
+                                : $"SceneId {contentDirectoryData.SceneId} is out of range in the AddressableRootAsset";
+                            throw new Exception($"Content Directory scene load failed for address '{m_Location.PrimaryKey}': {reason}.");
+                        }
+
+                        m_Inst = InternalLoadScene(scene, m_LoadSceneParameters, m_ActivateOnLoad, m_Priority);
+                    }
+                    else
+#endif
+                    {
+                        m_Inst = InternalLoadScene(m_Location, loadingFromBundle, m_LoadSceneParameters, m_ActivateOnLoad, m_Priority);
+                    }
+
                     ((IUpdateReceiver)this).Update(0.0f);
                 }
                 else
@@ -124,6 +159,16 @@ namespace UnityEngine.ResourceManagement.ResourceProviders
                 HasExecuted = true;
             }
 
+#if ENABLE_CONTENT_DIRECTORIES
+            internal SceneInstance InternalLoadScene(LoadableSceneId scene, LoadSceneParameters loadSceneParameters, bool activateOnLoad, int priority)
+            {
+                var op = SceneManager.LoadSceneAsync(scene, loadSceneParameters);
+                op.allowSceneActivation = activateOnLoad;
+                op.priority = priority;
+                var si = new SceneInstance() { m_Operation = op, Scene = SceneManager.GetSceneAt(SceneManager.sceneCount - 1), ReleaseSceneOnSceneUnloaded = m_ReleaseMode == SceneReleaseMode.ReleaseSceneWhenSceneUnloaded };
+                return si;
+            }
+#endif
             internal SceneInstance InternalLoadScene(IResourceLocation location, bool loadingFromBundle, LoadSceneParameters loadSceneParameters, bool activateOnLoad, int priority)
             {
                 var internalId = m_ResourceManager.TransformInternalId(location);
@@ -299,7 +344,10 @@ namespace UnityEngine.ResourceManagement.ResourceProviders
         {
             AsyncOperationHandle<IList<AsyncOperationHandle>> depOp = default(AsyncOperationHandle<IList<AsyncOperationHandle>>);
             if (location.HasDependencies)
-                depOp = resourceManager.ProvideResourceGroupCached(location.Dependencies, location.DependencyHashCode, typeof(IAssetBundleResource), null);
+            {
+                var depType = GetSceneDependencyResourceType(resourceManager, location);
+                depOp = resourceManager.ProvideResourceGroupCached(location.Dependencies, location.DependencyHashCode, depType, null);
+            }
 
             SceneOp op = new SceneOp(resourceManager, this);
             op.Init(location, loadSceneParameters, releaseMode, activateOnLoad, priority, depOp);
@@ -312,14 +360,29 @@ namespace UnityEngine.ResourceManagement.ResourceProviders
             return handle;
         }
 
-        /// <inheritdoc/>
-        public AsyncOperationHandle<SceneInstance> ReleaseScene(ResourceManager resourceManager, AsyncOperationHandle<SceneInstance> sceneLoadHandle)
+        internal Type GetSceneDependencyResourceType(ResourceManager resourceManager, IResourceLocation location)
         {
-            return ((ISceneProvider2)(this)).ReleaseScene(resourceManager, sceneLoadHandle, UnloadSceneOptions.None);
+            // Check the first dependency's provider to determine what type it provides
+            if (location.HasDependencies && location.Dependencies.Count > 0)
+            {
+                var depLocation = location.Dependencies[0];
+                var depProvider = resourceManager.GetResourceProvider(null, depLocation);
+                if (depProvider is ResourceProviderBase rpb && rpb.SceneDependencyResourceType != null)
+                    return rpb.SceneDependencyResourceType;
+            }
+
+            var provider = resourceManager.GetResourceProvider(null, location); // Ensure provider is registered and throw if not
+            return (provider as ResourceProviderBase)?.SceneDependencyResourceType ?? typeof(IAssetBundleResource);
         }
 
         /// <inheritdoc/>
-        AsyncOperationHandle<SceneInstance> ISceneProvider2.ReleaseScene(ResourceManager resourceManager, AsyncOperationHandle<SceneInstance> sceneLoadHandle, UnloadSceneOptions unloadOptions)
+        public AsyncOperationHandle<SceneInstance> ReleaseScene(ResourceManager resourceManager, AsyncOperationHandle<SceneInstance> sceneLoadHandle)
+        {
+            return ((ISceneProvider)(this)).ReleaseScene(resourceManager, sceneLoadHandle, UnloadSceneOptions.None);
+        }
+
+        /// <inheritdoc/>
+        AsyncOperationHandle<SceneInstance> ISceneProvider.ReleaseScene(ResourceManager resourceManager, AsyncOperationHandle<SceneInstance> sceneLoadHandle, UnloadSceneOptions unloadOptions)
         {
             var unloadOp = new UnloadSceneOp();
             unloadOp.Init(sceneLoadHandle, unloadOptions);

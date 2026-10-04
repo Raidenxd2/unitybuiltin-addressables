@@ -13,10 +13,22 @@ using UnityEditor.AddressableAssets.Build;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using Assert = UnityEngine.Assertions.Assert;
 using UnityEditor.AddressableAssets.GUI.Adapters;
+using UnityEngine.ResourceManagement.Util;
 
 namespace UnityEditor.AddressableAssets.GUI
 {
     using Object = UnityEngine.Object;
+
+    /// <summary>
+    /// Represents the type of icon to display for a group based on its schema configuration.
+    /// </summary>
+    internal enum GroupIconType
+    {
+        None,
+        AssetBundle,
+        ContentDirectory,
+        Error
+    }
 
     internal class AddressableAssetEntryTreeView : TreeViewAdapter
     {
@@ -25,7 +37,12 @@ namespace UnityEditor.AddressableAssets.GUI
         string m_FirstSelectedGroup;
         private readonly Dictionary<AssetEntryTreeViewItem, bool> m_SearchedEntries = new Dictionary<AssetEntryTreeViewItem, bool>();
         private bool m_ForceSelectionClear = false;
+
+        // GenericMenu callbacks run outside the OnGUI loop; popups they request are stashed here and shown on the next repaint.
+        private Action m_DeferredPopup;
         private IconLazyLoad m_lazyLoader = new();
+        private static Dictionary<string, Texture2D> s_GroupIconCache = new Dictionary<string, Texture2D>();
+        private static Texture2D s_ErrorIcon = null;
 
         enum ColumnId
         {
@@ -81,6 +98,143 @@ namespace UnityEditor.AddressableAssets.GUI
             }
         }
 
+        /// <summary>
+        /// Determines the icon type for a group based on its schema configuration.
+        /// </summary>
+        /// <param name="group">The group to evaluate</param>
+        /// <returns>The icon type to display</returns>
+        public static GroupIconType GetGroupIconType(AddressableAssetGroup group)
+        {
+            if (group == null) return GroupIconType.None;
+
+            var bundledSchema = group.GetSchema<BundledAssetGroupSchema>();
+            var contentDirSchema = group.GetSchema<ContentDirectoryGroupSchema>();
+
+            bool hasBundledSchema = bundledSchema != null;
+            bool hasContentDirSchema = contentDirSchema != null;
+            bool bundledEnabled = hasBundledSchema && bundledSchema.IsEnabled;
+            bool contentDirEnabled = hasContentDirSchema && contentDirSchema.IsEnabled;
+
+            if (contentDirEnabled && !string.IsNullOrEmpty(contentDirSchema.LoadPath.Id))
+            {
+                // Only evaluate the load path once it has been assigned. While a schema is being added the groups
+                // tree can rebuild (and request this icon) from inside ContentDirectoryGroupSchema.Validate(),
+                // before the load path id is set, which would otherwise log a spurious
+                // "ProfileValueReference: GetValue called with empty id" warning.
+                string contentDirLoadPath = contentDirSchema.LoadPath.GetValue(group.Settings);
+                if (ResourceManagerConfig.IsPathRemote(contentDirLoadPath))
+                    return GroupIconType.Error;
+            }
+
+            // Both schemas present
+            if (hasBundledSchema && hasContentDirSchema)
+            {
+                // Both enabled -> error icon
+                if (bundledEnabled && contentDirEnabled)
+                    return GroupIconType.Error;
+
+                // Only one enabled -> use that one's icon
+                if (bundledEnabled)
+                    return GroupIconType.AssetBundle;
+                if (contentDirEnabled)
+                    return GroupIconType.ContentDirectory;
+
+                return GroupIconType.None; // Both present but neither enabled
+            }
+
+            // Only one schema present -> use that schema's icon if enabled
+            if (hasBundledSchema)
+                return bundledEnabled ? GroupIconType.AssetBundle : GroupIconType.None;
+
+            if (hasContentDirSchema)
+                return contentDirEnabled ? GroupIconType.ContentDirectory : GroupIconType.None;
+
+            return GroupIconType.None; // No schemas
+        }
+
+        /// <summary>
+        /// Gets the appropriate icon for a group based on its schema configuration.
+        /// </summary>
+        /// <param name="group">The group to get the icon for</param>
+        /// <param name="isSelected">Whether the group is currently selected</param>
+        /// <returns>The icon texture, or null if no icon should be displayed</returns>
+        public static Texture2D GetGroupIcon(AddressableAssetGroup group, bool isSelected)
+        {
+            var iconType = GetGroupIconType(group);
+            if (iconType == GroupIconType.None)
+                return null;
+
+            if (iconType == GroupIconType.Error)
+            {
+                // Cache the error icon to avoid per-frame allocations
+                if (s_ErrorIcon == null)
+                    s_ErrorIcon = EditorGUIUtility.IconContent("console.erroricon").image as Texture2D;
+                return s_ErrorIcon;
+            }
+
+            // Determine theme and construct path using minimal allocations
+            bool isDark = EditorGUIUtility.isProSkin;
+
+            string path;
+            if (iconType == GroupIconType.AssetBundle)
+            {
+                if (isDark)
+                {
+                    path = isSelected
+                        ? "Packages/com.unity.addressables/Editor/Icons/Groups Window/Dark Theme - Selected/Asset Bundle/d_AssetBundle On.png"
+                        : "Packages/com.unity.addressables/Editor/Icons/Groups Window/Dark Theme/Asset Bundle/d_AssetBundle.png";
+                }
+                else
+                {
+                    path = isSelected
+                        ? "Packages/com.unity.addressables/Editor/Icons/Groups Window/Light Theme - Selected/Asset Bundle/AssetBundle On.png"
+                        : "Packages/com.unity.addressables/Editor/Icons/Groups Window/Light Theme/Asset Bundle/AssetBundle.png";
+                }
+            }
+            else // GroupIconType.ContentDirectory
+            {
+                if (isDark)
+                {
+                    path = isSelected
+                        ? "Packages/com.unity.addressables/Editor/Icons/Groups Window/Dark Theme - Selected/Content Directory/d_ContentDirectory On.png"
+                        : "Packages/com.unity.addressables/Editor/Icons/Groups Window/Dark Theme/Content Directory/d_ContentDirectory.png";
+                }
+                else
+                {
+                    path = isSelected
+                        ? "Packages/com.unity.addressables/Editor/Icons/Groups Window/Light Theme - Selected/Content Directory/ContentDirectory On.png"
+                        : "Packages/com.unity.addressables/Editor/Icons/Groups Window/Light Theme/Content Directory/ContentDirectory.png";
+                }
+            }
+
+            // For high-DPI displays, try to load the @2x variant first
+            string hiDpiPath = null;
+            if (EditorGUIUtility.pixelsPerPoint > 1f)
+            {
+                hiDpiPath = path.Replace(".png", "@2x.png");
+            }
+
+            // Check cache first (use hi-DPI path as cache key if available)
+            string cacheKey = hiDpiPath ?? path;
+            if (s_GroupIconCache.TryGetValue(cacheKey, out var cachedIcon))
+                return cachedIcon;
+
+            // Try to load hi-DPI variant first, fall back to base icon
+            Texture2D icon = null;
+            if (hiDpiPath != null)
+            {
+                icon = AssetDatabase.LoadAssetAtPath<Texture2D>(hiDpiPath);
+            }
+            if (icon == null)
+            {
+                icon = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+            }
+
+            // Cache the result (including null to prevent repeated disk access)
+            s_GroupIconCache[cacheKey] = icon;
+
+            return icon;
+        }
 
         internal TreeViewItemAdapter Root => rootItem as TreeViewItemAdapter;
 
@@ -189,15 +343,19 @@ namespace UnityEditor.AddressableAssets.GUI
         protected override TreeViewItemAdapter BuildRootAdapter()
         {
             var root = new TreeViewItemAdapter(-1, -1);
-            using (new AddressablesFileEnumerationScope(BuildAddressableTree(m_Editor.settings)))
+            using (var enumerator = new AddressableFolderEnumerator(m_Editor.settings, false, null))
             {
                 SortGroups();
                 var guidMap = new Dictionary<string, AddressableAssetGroup>();
                 foreach (var group in m_Editor.settings.groups)
+                {
+                    if (group == null)
+                        continue;
                     guidMap.Add(group.Guid, group);
+                }
 
                 foreach (var groupGuid in GetTreeViewState().sortOrderList)
-                    AddGroupChildrenBuild(guidMap[groupGuid], root);
+                    AddGroupChildrenBuild(guidMap[groupGuid], root, enumerator);
             }
 
             return root;
@@ -401,9 +559,13 @@ namespace UnityEditor.AddressableAssets.GUI
                 }
                 for (var i = 0; i <  m_Editor.settings.groups.Count; i++)
                 {
-                    var guid = m_Editor.settings.groups[i].Guid;
+                    var group = m_Editor.settings.groups[i];
+                    if (group == null)
+                        continue;
+
+                    var guid = group.Guid;
                     newSortOrder.Add(guid);
-                    guidToName[guid] = m_Editor.settings.groups[i].Name;
+                    guidToName[guid] = group.Name;
                     if (!guidToExistingIndex.ContainsKey(guid))
                     {
                         missingGuid = true;
@@ -412,7 +574,7 @@ namespace UnityEditor.AddressableAssets.GUI
                 }
 
                 // if the count is the same and all of the guids are in the state's sortOrder skip sorting
-                if (m_Editor.settings.groups.Count == s.sortOrderList.Count && !missingGuid)
+                if (newSortOrder.Count == s.sortOrderList.Count && !missingGuid)
                 {
                     return;
                 }
@@ -594,7 +756,7 @@ namespace UnityEditor.AddressableAssets.GUI
             return false;
         }
 
-        void AddGroupChildrenBuild(AddressableAssetGroup group, TreeViewItemAdapter root)
+        void AddGroupChildrenBuild(AddressableAssetGroup group, TreeViewItemAdapter root, AddressableFolderEnumerator enumerator = null)
         {
             int depth = 0;
 
@@ -633,7 +795,7 @@ namespace UnityEditor.AddressableAssets.GUI
             {
                 foreach (var entry in group.entries)
                 {
-                    AddAndRecurseEntriesBuild(entry, groupItem, depth + 1, IsExpanded(groupItem.id));
+                    AddAndRecurseEntriesBuild(entry, groupItem, depth + 1, IsExpanded(groupItem.id), enumerator);
                 }
             }
         }
@@ -654,7 +816,7 @@ namespace UnityEditor.AddressableAssets.GUI
             return false;
         }
 
-        void AddAndRecurseEntriesBuild(AddressableAssetEntry entry, AssetEntryTreeViewItem parent, int depth, bool expanded)
+        void AddAndRecurseEntriesBuild(AddressableAssetEntry entry, AssetEntryTreeViewItem parent, int depth, bool expanded, AddressableFolderEnumerator enumerator = null)
         {
             var item = new AssetEntryTreeViewItem(entry, depth);
             parent.AddChild(item);
@@ -664,22 +826,22 @@ namespace UnityEditor.AddressableAssets.GUI
                 return;
             }
 
-            RecurseEntryChildren(entry, item, depth);
+            RecurseEntryChildren(entry, item, depth, enumerator);
         }
 
-        internal void RecurseEntryChildren(AddressableAssetEntry entry, AssetEntryTreeViewItem item, int depth)
+        internal void RecurseEntryChildren(AddressableAssetEntry entry, AssetEntryTreeViewItem item, int depth, AddressableFolderEnumerator enumerator = null)
         {
             item.checkedForChildren = true;
             var subAssets = new List<AddressableAssetEntry>();
             bool includeSubObjects = ProjectConfigData.ShowSubObjectsInGroupView && !entry.IsFolder && !string.IsNullOrEmpty(entry.guid);
-            entry.GatherAllAssets(subAssets, false, false, includeSubObjects);
+            entry.GatherAllAssets(subAssets, false, false, includeSubObjects, null, enumerator);
             if (subAssets.Count > 0)
             {
                 foreach (var e in subAssets)
                 {
                     if (e.guid.Length > 0 && e.address.Contains('[') && e.address.Contains(']'))
                         Debug.LogErrorFormat("Subasset address '{0}' cannot contain '[ ]'.", e.address);
-                    AddAndRecurseEntriesBuild(e, item, depth + 1, IsExpanded(item.id));
+                    AddAndRecurseEntriesBuild(e, item, depth + 1, IsExpanded(item.id), enumerator);
                 }
             }
         }
@@ -703,6 +865,13 @@ namespace UnityEditor.AddressableAssets.GUI
             m_Editor.settings.labelTable.Initialize();
 
             base.OnGUI(rect);
+
+            if (m_DeferredPopup != null && Event.current.type == EventType.Repaint)
+            {
+                Action deferredPopup = m_DeferredPopup;
+                m_DeferredPopup = null;
+                deferredPopup();
+            }
 
             //TODO - this occasionally causes a "hot control" issue.
             if (m_ForceSelectionClear ||
@@ -740,17 +909,8 @@ namespace UnityEditor.AddressableAssets.GUI
             }
         }
 
-        GUIStyle m_LabelStyle;
-
         protected override void RowGUI(RowGUIArgs args)
         {
-            if (m_LabelStyle == null)
-            {
-                m_LabelStyle = new GUIStyle("PR Label");
-                if (m_LabelStyle == null)
-                    m_LabelStyle = UnityEngine.GUI.skin.GetStyle("Label");
-            }
-
             var item = args.item as AssetEntryTreeViewItem;
             if (item == null || item.group == null && item.entry == null)
             {
@@ -803,6 +963,11 @@ namespace UnityEditor.AddressableAssets.GUI
 
                 case ColumnId.Id:
                 {
+                    // Update group icon based on current selection state
+                    if (item.group != null)
+                    {
+                        item.icon = GetGroupIcon(item.group, args.selected);
+                    }
                     args.rowRect = cellRect;
                     base.RowGUI(args);
                 }
@@ -813,7 +978,7 @@ namespace UnityEditor.AddressableAssets.GUI
                         var path = item.entry.AssetPath;
                         if (string.IsNullOrEmpty(path))
                             path = item.entry.ReadOnly ? "" : "Missing File";
-                        m_LabelStyle.Draw(cellRect, path, false, false, args.selected, args.focused);
+                        DefaultGUI.Label(cellRect, path, args.selected, args.focused);
                     }
 
                     break;
@@ -1016,7 +1181,10 @@ namespace UnityEditor.AddressableAssets.GUI
                 menu.AddItem(new GUIContent("Create New Group/" + templateObject.name), false, CreateNewGroup, templateObject);
             }
 
-            menu.AddItem(new GUIContent("Clear Content Update Warnings"), false, ClearContentUpdateWarnings);
+            if (HasAnyContentUpdateWarnings())
+                menu.AddItem(new GUIContent("Clear Content Update Warnings"), false, ClearContentUpdateWarnings);
+            else
+                menu.AddDisabledItem(new GUIContent("Clear Content Update Warnings"));
         }
 
         void ClearContentUpdateWarnings()
@@ -1025,6 +1193,42 @@ namespace UnityEditor.AddressableAssets.GUI
                 ContentUpdateScript.ClearContentUpdateNotifications(group);
 
             Reload();
+        }
+
+        bool HasAnyContentUpdateWarnings()
+        {
+            if (m_Editor.settings.groups == null)
+                return false;
+
+            foreach (var group in m_Editor.settings.groups)
+            {
+                if (group != null && group.FlaggedDuringContentUpdateRestriction)
+                    return true;
+            }
+
+            return false;
+        }
+
+        bool HasContentUpdateWarningsInSelection(List<AssetEntryTreeViewItem> selectedNodes)
+        {
+            if (selectedNodes == null || selectedNodes.Count == 0)
+                return false;
+
+            foreach (var item in selectedNodes)
+            {
+                if (item.IsGroup && item.group != null)
+                {
+                    if (item.group.FlaggedDuringContentUpdateRestriction)
+                        return true;
+                }
+                else if (item.entry != null)
+                {
+                    if (item.entry.FlaggedDuringContentUpdateRestriction)
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         void HandleCustomContextMenuItemGroups(object context)
@@ -1082,20 +1286,49 @@ namespace UnityEditor.AddressableAssets.GUI
                 return;
 
             GenericMenu menu = new GenericMenu();
+            if (selectedNodes.Count == 1)
+            {
+                var label = CheckForRename(selectedNodes.First(), false);
+                if (!string.IsNullOrEmpty(label))
+                    menu.AddItem(new GUIContent(label), false, RenameItem, selectedNodes);
+            }
             if (!hasReadOnly)
             {
                 if (isGroup)
                 {
                     var group = selectedNodes.First().group;
-                    if (!group.IsDefaultGroup())
-                        menu.AddItem(new GUIContent("Remove Group(s)"), false, RemoveGroup, selectedNodes);
                     menu.AddItem(new GUIContent("Simplify Addressable Names"), false, SimplifyAddresses, selectedNodes);
                     if (selectedNodes.Count == 1)
                     {
                         if (!group.IsDefaultGroup() && group.CanBeSetAsDefault())
                             menu.AddItem(new GUIContent("Set as Default"), false, SetGroupAsDefault, selectedNodes);
-                        menu.AddItem(new GUIContent("Inspect Group Settings"), false, GoToGroupAsset, selectedNodes);
                     }
+                    // Show "Convert to Content Directory" for groups that are currently AssetBundle groups,
+                    // and "Convert to AssetBundles" for groups that are currently Content Directory groups.
+                    // A multi-selection containing both types shows both options.
+                    bool anyAssetBundleGroups = false;
+                    bool anyContentDirectoryGroups = false;
+                    foreach (var node in selectedNodes)
+                    {
+                        if (!node.IsGroup || node.group == null)
+                            continue;
+                        if (!anyAssetBundleGroups && IsAssetBundleGroup(node.group)) //short circuiting to avoid unnecessary calls to IsAssetBundleGroup
+                            anyAssetBundleGroups = true;
+                        if (!anyContentDirectoryGroups && IsContentDirectoryGroup(node.group)) //short circuiting to avoid unnecessary calls to IsContentDirectoryGroup
+                            anyContentDirectoryGroups = true;
+
+                        // If both types of groups have been found, no need to continue checking the rest of the selection.
+                        if (anyAssetBundleGroups && anyContentDirectoryGroups)
+                            break;
+                    }
+
+                    if (anyAssetBundleGroups)
+                        menu.AddItem(new GUIContent("Convert schema(s) to Content Directory"), false, ConvertToContentDirectory, selectedNodes);
+                    if (anyContentDirectoryGroups)
+                        menu.AddItem(new GUIContent("Convert schema(s) to AssetBundles"), false, ConvertToAssetBundles, selectedNodes);
+
+                    if (!group.IsDefaultGroup())
+                        menu.AddItem(new GUIContent("Delete Group(s)"), false, RemoveGroup, selectedNodes);
 
                     foreach (var i in AddressableAssetSettings.CustomAssetGroupCommands)
                         menu.AddItem(new GUIContent(i), false, HandleCustomContextMenuItemGroups, new Tuple<string, List<AssetEntryTreeViewItem>>(i, selectedNodes));
@@ -1131,14 +1364,10 @@ namespace UnityEditor.AddressableAssets.GUI
                 }
             }
 
-            if (selectedNodes.Count == 1)
-            {
-                var label = CheckForRename(selectedNodes.First(), false);
-                if (!string.IsNullOrEmpty(label))
-                    menu.AddItem(new GUIContent(label), false, RenameItem, selectedNodes);
-            }
-
-            PopulateGeneralContextMenu(ref menu);
+            if (HasContentUpdateWarningsInSelection(selectedNodes))
+                menu.AddItem(new GUIContent("Clear Content Update Warnings"), false, ClearContentUpdateWarnings);
+            else
+                menu.AddDisabledItem(new GUIContent("Clear Content Update Warnings"));
 
             menu.ShowAsContext();
         }
@@ -1177,9 +1406,9 @@ namespace UnityEditor.AddressableAssets.GUI
                     entries.Add(item.entry);
             }
 
-            var window = EditorWindow.GetWindow<GroupsPopupWindow>(true, "Select Addressable Group");
             Vector2 mousePosition = pair.Item1 == null ? Vector2.zero : pair.Item1.mousePosition;
-            window.Initialize(null, false, false, mousePosition, MoveEntriesToNewGroupWithSettings, m_Editor.settings, entries);
+            m_DeferredPopup = () => GroupsPopupUtility.ShowGroupsPopup(new Rect(mousePosition, Vector2.zero), null, false, false, MoveEntriesToNewGroupWithSettings, m_Editor.settings, entries);
+            m_Editor.window?.Repaint();
         }
 
         void MoveEntriesToNewGroupWithSettings(AddressableAssetSettings settings, List<AddressableAssetEntry> entries, AddressableAssetGroup group)
@@ -1211,10 +1440,10 @@ namespace UnityEditor.AddressableAssets.GUI
                 }
             }
 
-            var window = EditorWindow.GetWindow<GroupsPopupWindow>(true, "Select Addressable Group");
             AddressableAssetGroup initialSelection = !mixedGroups ? entries[0].parentGroup : null;
             Vector2 mousePosition = pair.Item1 == null ? Vector2.zero : pair.Item1.mousePosition;
-            window.Initialize(initialSelection, false, false, mousePosition, AddressableAssetUtility.MoveEntriesToGroup, m_Editor.settings, entries);
+            m_DeferredPopup = () => GroupsPopupUtility.ShowGroupsPopup(new Rect(mousePosition, Vector2.zero), initialSelection, false, false, AddressableAssetUtility.MoveEntriesToGroup, m_Editor.settings, entries);
+            m_Editor.window?.Repaint();
         }
 
         internal void CreateNewGroup(object context)
@@ -1327,6 +1556,261 @@ namespace UnityEditor.AddressableAssets.GUI
             }
 
             m_Editor.settings.SetDirty(AddressableAssetSettings.ModificationEvent.EntryModified, entries, true, false);
+        }
+
+        /// <summary>
+        /// Returns true if the group currently builds as AssetBundles (has an enabled <see cref="BundledAssetGroupSchema"/>).
+        /// </summary>
+        internal static bool IsAssetBundleGroup(AddressableAssetGroup group)
+        {
+            var bundledSchema = group.GetSchema<BundledAssetGroupSchema>();
+            return bundledSchema != null && bundledSchema.IsEnabled;
+        }
+
+        /// <summary>
+        /// Returns true if the group currently builds as a Content Directory (has an enabled <see cref="ContentDirectoryGroupSchema"/>).
+        /// </summary>
+        internal static bool IsContentDirectoryGroup(AddressableAssetGroup group)
+        {
+            var contentDirSchema = group.GetSchema<ContentDirectoryGroupSchema>();
+            return contentDirSchema != null && contentDirSchema.IsEnabled;
+        }
+
+        /// <summary>
+        /// Returns true if the group's AssetBundles would load from a remote location.
+        /// Content Directories do not support remote load paths, so such a group cannot be validly converted.
+        /// </summary>
+        static bool IsBundledContentRemote(AddressableAssetGroup group)
+        {
+            var bundledSchema = group.GetSchema<BundledAssetGroupSchema>();
+            if (bundledSchema == null)
+                return false;
+            string loadPath = bundledSchema.LoadPath.GetValue(group.Settings);
+            return ResourceManagerConfig.IsPathRemote(loadPath);
+        }
+
+        protected void ConvertToContentDirectory(object context)
+        {
+            List<AssetEntryTreeViewItem> selectedNodes = context as List<AssetEntryTreeViewItem>;
+            ConvertToContentDirectoryImpl(selectedNodes);
+        }
+
+        internal void ConvertToContentDirectoryImpl(List<AssetEntryTreeViewItem> selectedNodes, bool skipConfirmation = false)
+        {
+            if (selectedNodes == null || selectedNodes.Count < 1)
+                return;
+
+            string buildPath = Path.Combine(Addressables.LibraryPath, AddressablesImpl.StreamingAssetsSubFolder);
+
+            if (!skipConfirmation)
+            {
+                // Check if we need to show the warning popup
+                const string editorPrefKey = "Addressables.ContentDirectory.ShownBundleWarning";
+                bool hasShownWarning = EditorPrefs.GetBool(editorPrefKey, false);
+
+                if (!hasShownWarning)
+                {
+                    string message = $"Converting to Content Directories will invalidate the AssetBundles in the default build path.\r\nThis action will also delete all AssetBundles in {buildPath} to ensure invalid AssetBundles don't end up in your Player build.";
+
+                    if (!EditorUtility.DisplayDialog("Convert to Content Directory", message, "Convert & Delete", "Cancel"))
+                        return;
+
+                    // Mark that we've shown the warning
+                    EditorPrefs.SetBool(editorPrefKey, true);
+                }
+            }
+
+            var modifiedGroups = new List<AddressableAssetGroup>();
+            bool anySwitchedToContentDirectory = false;
+
+            foreach (var item in selectedNodes)
+            {
+                if (!item.IsGroup || item.group == null)
+                    continue;
+
+                bool isAlreadyContentDirectoryGroup = IsContentDirectoryGroup(item.group);
+                if(isAlreadyContentDirectoryGroup)
+                    continue;
+
+                if (ConvertGroupToContentDirectory(item.group))
+                    modifiedGroups.Add(item.group);
+
+                if (IsContentDirectoryGroup(item.group))
+                    anySwitchedToContentDirectory = true;
+            }
+
+            if (modifiedGroups.Count > 0)
+            {
+                m_Editor.settings.SetDirty(AddressableAssetSettings.ModificationEvent.GroupSchemaModified, modifiedGroups, true, true);
+                foreach (var g in modifiedGroups)
+                {
+                    AddressableAssetUtility.OpenAssetIfUsingVCIntegration(g);
+                }
+            }
+
+            // Delete built bundles only once a group actually switched, so a remote-only selection doesn't wipe output.
+            if (!skipConfirmation && anySwitchedToContentDirectory && Directory.Exists(buildPath))
+            {
+                try
+                {
+                    Directory.Delete(buildPath, true);
+                    Debug.Log($"Deleted bundles from {buildPath} after converting to Content Directory");
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"Failed to delete {buildPath}: {e.Message}");
+                }
+            }
+        }
+
+        // Converts a single group so its content builds as a Content Directory. The BundledAssetGroupSchema is
+        // disabled (not removed) so the conversion can be reversed via ConvertToAssetBundles.
+        // If the group's AssetBundles load remotely the conversion would be invalid, so a warning is logged and
+        // the ContentDirectoryGroupSchema is added in a disabled state instead of switching the group over.
+        // Returns true if the group was modified.
+        bool ConvertGroupToContentDirectory(AddressableAssetGroup group)
+        {
+            bool isRemote = IsBundledContentRemote(group);
+            bool wasModified = false;
+
+            // Capture the AssetBundle build and load paths so the Content Directory schema can inherit them.
+            string buildPathId = null;
+            string loadPathId = null;
+            var bundledSchema = group.GetSchema<BundledAssetGroupSchema>();
+            if (bundledSchema != null)
+            {
+                buildPathId = bundledSchema.BuildPath.Id;
+                loadPathId = bundledSchema.LoadPath.Id;
+            }
+
+            if (isRemote)
+            {
+                Debug.LogWarning($"Group \"{group.Name}\" loads AssetBundles from a remote location, which Content Directories do not support. " +
+                    "Added a Content Directory schema in a disabled state; the group still builds as AssetBundles. " +
+                    "Update the Content Directory load path to a local path before enabling it.");
+            }
+
+            var contentDirSchema = group.GetSchema<ContentDirectoryGroupSchema>();
+            if (contentDirSchema == null)
+            {
+                contentDirSchema = group.AddSchema<ContentDirectoryGroupSchema>(false);
+                wasModified = true;
+            }
+
+            // Inherit the build path on every switch so the Content Directory keeps writing to the group's output
+            // location. Only inherit the load path for local content; a remote load path is invalid for a Content
+            // Directory, so leave the schema on its default local load path.
+            if (!string.IsNullOrEmpty(buildPathId) && contentDirSchema.m_BuildPath.Id != buildPathId)
+            {
+                contentDirSchema.m_BuildPath.Id = buildPathId;
+                wasModified = true;
+
+            }
+            if (!isRemote && !string.IsNullOrEmpty(loadPathId) && contentDirSchema.m_LoadPath.Id != loadPathId)
+            {
+                contentDirSchema.m_LoadPath.Id = loadPathId;
+                wasModified = true;
+            }
+
+            if (isRemote)
+            {
+                if (contentDirSchema.IsEnabled)
+                {
+                    // Keep building as AssetBundles; the Content Directory schema stays disabled.
+                    contentDirSchema.IsEnabled = false;
+                    wasModified = true;
+                }
+            }
+            else
+            {
+                // Disable (do not remove) the BundledAssetGroupSchema so the group builds as a Content Directory,
+                // then enable the Content Directory schema. Disabling first keeps only one buildable schema enabled.
+                if (bundledSchema != null && bundledSchema.IsEnabled)
+                {
+                    bundledSchema.IsEnabled = false;
+                    wasModified = true;
+                }
+
+                if (!contentDirSchema.IsEnabled)
+                {
+                    contentDirSchema.IsEnabled = true;
+                    wasModified = true;
+                }
+            }
+
+            if(wasModified)
+                EditorUtility.SetDirty(group);
+
+            return wasModified;
+        }
+
+        protected void ConvertToAssetBundles(object context)
+        {
+            List<AssetEntryTreeViewItem> selectedNodes = context as List<AssetEntryTreeViewItem>;
+            ConvertToAssetBundlesImpl(selectedNodes);
+        }
+
+        internal void ConvertToAssetBundlesImpl(List<AssetEntryTreeViewItem> selectedNodes)
+        {
+            if (selectedNodes == null || selectedNodes.Count < 1)
+                return;
+
+            var modifiedGroups = new List<AddressableAssetGroup>();
+
+            foreach (var item in selectedNodes)
+            {
+                if (!item.IsGroup || item.group == null)
+                    continue;
+
+                if (ConvertGroupToAssetBundles(item.group))
+                    modifiedGroups.Add(item.group);
+            }
+
+            if (modifiedGroups.Count > 0)
+            {
+                m_Editor.settings.SetDirty(AddressableAssetSettings.ModificationEvent.GroupSchemaModified, modifiedGroups, true, true);
+                foreach (var g in modifiedGroups)
+                {
+                    AddressableAssetUtility.OpenAssetIfUsingVCIntegration(g);
+                }
+            }
+        }
+
+        // Converts a single group so its content builds as AssetBundles. The ContentDirectoryGroupSchema is
+        // disabled (not removed) so the conversion can be reversed via ConvertToContentDirectory.
+        // Returns true if the group was modified.
+        bool ConvertGroupToAssetBundles(AddressableAssetGroup group)
+        {
+            // Capture the Content Directory build and load paths so the AssetBundle schema can inherit them.
+            string buildPathId = null;
+            string loadPathId = null;
+            var contentDirSchema = group.GetSchema<ContentDirectoryGroupSchema>();
+            if (contentDirSchema != null)
+            {
+                buildPathId = contentDirSchema.BuildPath.Id;
+                loadPathId = contentDirSchema.LoadPath.Id;
+            }
+
+            var bundledSchema = group.GetSchema<BundledAssetGroupSchema>();
+            if (bundledSchema == null)
+                bundledSchema = group.AddSchema<BundledAssetGroupSchema>(false);
+
+            // Inherit the Content Directory paths on every switch, not only when the schema is first added.
+            if (!string.IsNullOrEmpty(buildPathId))
+            {
+                bundledSchema.m_BuildPath.Id = buildPathId;
+                bundledSchema.m_LoadPath.Id = loadPathId;
+            }
+
+            // Disable (do not remove) the ContentDirectoryGroupSchema so the group builds as AssetBundles,
+            // then enable the AssetBundle schema. Disabling first keeps only one buildable schema enabled.
+            if (contentDirSchema != null)
+                contentDirSchema.IsEnabled = false;
+
+            bundledSchema.IsEnabled = true;
+
+            EditorUtility.SetDirty(group);
+            return true;
         }
 
         protected void RemoveEntry(object context)
@@ -1644,15 +2128,28 @@ namespace UnityEditor.AddressableAssets.GUI
             if (state is AddressableAssetEntryTreeViewState s)
             {
                 var settings = AddressableAssetGroupSortSettings.GetSettings();
-                settings.sortOrder = new string[s.sortOrderList.Count];
-                for (var i = 0; i < s.sortOrderList.Count; i++)
+
+                bool hasChanged = settings.sortOrder == null || settings.sortOrder.Length != s.sortOrderList.Count;
+                if (!hasChanged)
                 {
-                    settings.sortOrder[i] = s.sortOrderList[i];
+                    for (var i = 0; i < s.sortOrderList.Count; i++)
+                    {
+                        if (settings.sortOrder[i] != s.sortOrderList[i])
+                        {
+                            hasChanged = true;
+                            break;
+                        }
+                    }
                 }
 
-                AddressableAssetUtility.OpenAssetIfUsingVCIntegration(settings);
-                EditorUtility.SetDirty(settings);
-                AssetDatabase.SaveAssets();
+                // Only update and save if something actually changed
+                if (hasChanged)
+                {
+                    settings.sortOrder = s.sortOrderList.ToArray();
+
+                    AddressableAssetUtility.OpenAssetIfUsingVCIntegration(settings);
+                    EditorUtility.SetDirty(settings);
+                }
             }
 
             if (multiColumnHeader is AddressableAssetSettingsGroupHeader h)
@@ -1714,6 +2211,12 @@ namespace UnityEditor.AddressableAssets.GUI
             folderPath = string.Empty;
             assetIcon = null;
             isRenaming = false;
+
+            // Set icon for group (appears to the left of group name in Id column)
+            if (group != null)
+            {
+                icon = AddressableAssetEntryTreeView.GetGroupIcon(group, false);
+            }
         }
 
         public AssetEntryTreeViewItem(string folder, int d, int id) : base(id, d, string.IsNullOrEmpty(folder) ? "missing" : folder)

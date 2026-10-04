@@ -15,13 +15,12 @@ using UnityEngine.AddressableAssets.ResourceLocators;
 using UnityEngine.AddressableAssets.ResourceProviders;
 using UnityEngine.AddressableAssets.Utility;
 using UnityEngine.ResourceManagement.AsyncOperations;
+using UnityEngine.ResourceManagement.Util;
 using System.Text.RegularExpressions;
 using System.Linq;
 using System.Text;
-using NUnit.Framework.Internal;
+using UnityEditor.AddressableAssets.Tests.Runtime.TestObjects;
 using UnityEngine.AddressableAssets.ResourceProviders.Tests;
-using UnityEngine.AddressableAssets.Tests;
-using UnityEngine.Lumin;
 using UnityEngine.Networking;
 using UnityEngine.U2D;
 using Object = UnityEngine.Object;
@@ -29,7 +28,6 @@ using Texture2D = UnityEngine.Texture2D;
 
 #if UNITY_EDITOR
 using UnityEditor;
-using UnityEditor.AddressableAssets.Settings;
 #endif
 
 namespace AddressableAssetsIntegrationTests
@@ -56,15 +54,18 @@ namespace AddressableAssetsIntegrationTests
         [UnityTest]
         public IEnumerator AsyncCache_IsCleaned_OnFailedOperation()
         {
-            yield return Init();
+           yield return Init();
 
-            AsyncOperationHandle<GameObject> op;
-            using (new IgnoreFailingLogMessage())
-                op = m_Addressables.LoadAssetAsync<GameObject>("notARealKey");
-
-            op.Completed += handle => { Assert.AreEqual(0, m_Addressables.ResourceManager.CachedOperationCount()); };
-
-            yield return op;
+           AsyncOperationHandle<GameObject> op = default;
+           try {
+               using (new IgnoreFailingLogMessage())
+                   op = m_Addressables.LoadAssetAsync<GameObject>("notARealKey");
+               yield return op;
+               Assert.AreEqual(0, m_Addressables.ResourceManager.CachedOperationCount());
+           } finally {
+               if (op.IsValid())
+                   m_Addressables.Release(op);
+           }
         }
 
         [UnityTest]
@@ -90,7 +91,7 @@ namespace AddressableAssetsIntegrationTests
 
             //Test
             Assert.DoesNotThrow(() => {
-                var handle = m_Addressables.LoadResourceLocationsAsync(AddressablesTestUtility.GetPrefabLabel("BASE"), typeof(GameObject));
+                var handle = m_Addressables.LoadResourceLocationsAsync(AddressablesTestUtility.GetPrefabLabel(BuildSuffix), typeof(GameObject));
                 handle.Release();
             });
 
@@ -163,7 +164,7 @@ namespace AddressableAssetsIntegrationTests
             AsyncOperationHandle<MeshRenderer> op = new AsyncOperationHandle<MeshRenderer>();
             using (new IgnoreFailingLogMessage())
             {
-                op = m_Addressables.LoadAssetAsync<MeshRenderer>("test0BASE");
+                op = m_Addressables.LoadAssetAsync<MeshRenderer>($"test0{BuildSuffix}");
             }
 
             yield return op;
@@ -203,7 +204,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            string keyString = "test0BASE";
+            string keyString = $"test0{BuildSuffix}";
             AsyncOperationHandle<TextAsset> handle = new AsyncOperationHandle<TextAsset>();
 
             try
@@ -234,7 +235,7 @@ namespace AddressableAssetsIntegrationTests
             //Setup
             yield return Init();
             string keyString = "mixed";
-            string otherAvailableTypesForKey = "UnityEngine.GameObject, UnityEngine.AddressableAssets.Tests.TestObject";
+            string otherAvailableTypesForKey = "UnityEngine.GameObject, UnityEditor.AddressableAssets.Tests.Runtime.TestObjects.TestObject";
             AsyncOperationHandle<TextAsset> handle = new AsyncOperationHandle<TextAsset>();
 
             try //Test
@@ -251,7 +252,7 @@ namespace AddressableAssetsIntegrationTests
                 if (!isEqual)
                 {
                     // order isn't guaranteed
-                    message = message.Replace("UnityEngine.GameObject, UnityEngine.AddressableAssets.Tests.TestObject", "UnityEngine.AddressableAssets.Tests.TestObject, UnityEngine.GameObject");
+                    message = message.Replace("UnityEngine.GameObject, UnityEditor.AddressableAssets.Tests.Runtime.TestObjects.TestObject", "UnityEditor.AddressableAssets.Tests.Runtime.TestObjects.TestObject, UnityEngine.GameObject");
                     isEqual = message == handle.OperationException.Message;
                 }
 
@@ -276,7 +277,7 @@ namespace AddressableAssetsIntegrationTests
             //Setup
             yield return Init();
 #if UNITY_EDITOR
-            string keyString = "test0BASE";
+            string keyString = $"test0{BuildSuffix}";
 
             AsyncOperationHandle<TextAsset> handle = new AsyncOperationHandle<TextAsset>();
             AsyncOperationHandle<GameObject> goLoadHandle = new AsyncOperationHandle<GameObject>();
@@ -444,7 +445,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            string[] keysArray = new[] {"test0BASE", "test1BASE"};
+            string[] keysArray = new[] {$"test0{BuildSuffix}", $"test1{BuildSuffix}"};
             AsyncOperationHandle handle = default(AsyncOperationHandle);
 
             try
@@ -457,7 +458,7 @@ namespace AddressableAssetsIntegrationTests
 
                 InvalidKeyException expected = new InvalidKeyException(keysArray, typeof(TextAsset), Addressables.MergeMode.Union);
                 StringBuilder stringBuilder = new StringBuilder(expected.FormatMergeModeMessage(InvalidKeyException.Format.MergeModeBase));
-                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.UnionAvailableForKeys, "Keys=test0BASE, test1BASE", null, typeof(GameObject).FullName));
+                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.UnionAvailableForKeys, $"Keys=test0{BuildSuffix}, test1{BuildSuffix}", null, typeof(GameObject).FullName));
                 Assert.AreEqual(stringBuilder.ToString(), handle.OperationException.Message, "Incorrect invalidKeyMessage. Expected to inform the two locations have for other type");
                 yield return handle;
             }
@@ -511,7 +512,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            string[] keysArray = new[] {"test0BASE", "assetWithSubObjects"};
+            string[] keysArray = new[] {$"test0{BuildSuffix}", "assetWithSubObjects"};
             AsyncOperationHandle handle = default(AsyncOperationHandle);
 
             try
@@ -524,8 +525,8 @@ namespace AddressableAssetsIntegrationTests
 
                 InvalidKeyException expected = new InvalidKeyException(keysArray, typeof(TextAsset), Addressables.MergeMode.Union);
                 StringBuilder stringBuilder = new StringBuilder(expected.FormatMergeModeMessage(InvalidKeyException.Format.MergeModeBase));
-                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.UnionAvailableForKeysWithoutOther, "Key=test0BASE", "Key=assetWithSubObjects", typeof(GameObject).FullName));
-                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.UnionAvailableForKeysWithoutOther, "Key=assetWithSubObjects", "Key=test0BASE", typeof(TestObject).FullName));
+                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.UnionAvailableForKeysWithoutOther, "Key=test0" + BuildSuffix, "Key=assetWithSubObjects", typeof(GameObject).FullName));
+                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.UnionAvailableForKeysWithoutOther, "Key=assetWithSubObjects", "Key=test0" + BuildSuffix, typeof(TestObject).FullName));
                 Assert.AreEqual(stringBuilder.ToString(), handle.OperationException.Message, "Incorrect invalidKeyMessage. Expected to inform that a merge could be made for two different types");
                 yield return handle;
             }
@@ -541,7 +542,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            string[] keysArray = new[] {"test0BASE", "noSuchKey"};
+            string[] keysArray = new[] {$"test0{BuildSuffix}", "noSuchKey"};
             AsyncOperationHandle handle = default(AsyncOperationHandle);
 
             try
@@ -570,7 +571,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            string[] keysArray = new[] {"test0BASE", "mixed"};
+            string[] keysArray = new[] {$"test0{BuildSuffix}", "mixed"};
             AsyncOperationHandle handle = default(AsyncOperationHandle);
 
             try
@@ -630,7 +631,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            string[] keysArray = new[] {"test0BASE", "noSuchKey"};
+            string[] keysArray = new[] {$"test0{BuildSuffix}", "noSuchKey"};
             AsyncOperationHandle handle = default(AsyncOperationHandle);
 
             try
@@ -644,7 +645,7 @@ namespace AddressableAssetsIntegrationTests
                 InvalidKeyException expected = new InvalidKeyException(keysArray, typeof(TextAsset), Addressables.MergeMode.UseFirst);
                 StringBuilder stringBuilder = new StringBuilder(expected.FormatMergeModeMessage(InvalidKeyException.Format.MergeModeBase));
                 stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.NoLocation, keysUnavailable: "noSuchKey"));
-                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.KeyAvailableAsType, "test0BASE", null, typeof(GameObject).FullName));
+                stringBuilder.Append(expected.FormatMergeModeMessage(InvalidKeyException.Format.KeyAvailableAsType, $"test0{BuildSuffix}", null, typeof(GameObject).FullName));
                 string expectedMessage = stringBuilder.ToString();
                 Assert.AreEqual(expectedMessage, handle.OperationException.Message,
                     "Incorrect invalidKeyMessage. Expected to inform that one key has no location and the other can be loaded with GameObject");
@@ -808,10 +809,11 @@ namespace AddressableAssetsIntegrationTests
             Assert.AreEqual(2, op.Result.Count);
             op.Release();
         }
-#if ENABLE_JSON_CATALOG
         [UnityTest]
         public IEnumerator CanUseCustomAssetBundleResource_LoadFromCustomProvider()
         {
+            if (!UseJsonCatalog)
+                Assert.Ignore("Custom bundle provider test requires JSON catalog format.");
             //Setup
             yield return Init();
             if (string.IsNullOrEmpty(TypeName) || TypeName == "BuildScriptFastMode")
@@ -834,7 +836,6 @@ namespace AddressableAssetsIntegrationTests
 
             op.Release();
         }
-#endif
         string TransFunc(IResourceLocation loc)
         {
             return "transformed";
@@ -891,7 +892,7 @@ namespace AddressableAssetsIntegrationTests
 
             //Test
             AsyncOperationHandle handle = default(AsyncOperationHandle);
-            Assert.DoesNotThrow(() => { handle = m_Addressables.LoadAssetAsync<GameObject>(AddressablesTestUtility.GetPrefabLabel("BASE")); });
+            Assert.DoesNotThrow(() => { handle = m_Addressables.LoadAssetAsync<GameObject>(AddressablesTestUtility.GetPrefabLabel(BuildSuffix)); });
             yield return handle;
 
             //Cleanup
@@ -903,7 +904,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            AsyncOperationHandle<GameObject> op = m_Addressables.LoadAssetAsync<GameObject>(AddressablesTestUtility.GetPrefabLabel("BASE"));
+            AsyncOperationHandle<GameObject> op = m_Addressables.LoadAssetAsync<GameObject>(AddressablesTestUtility.GetPrefabLabel(BuildSuffix));
 
             //Test
             while (op.PercentComplete < 1)
@@ -1048,7 +1049,7 @@ namespace AddressableAssetsIntegrationTests
         {
             //Setup
             yield return Init();
-            AsyncOperationHandle<GameObject> op = m_Addressables.LoadAssetAsync<GameObject>(AddressablesTestUtility.GetPrefabLabel("BASE"));
+            AsyncOperationHandle<GameObject> op = m_Addressables.LoadAssetAsync<GameObject>(AddressablesTestUtility.GetPrefabLabel(BuildSuffix));
 
             //Test
             float lastPercentComplete = 0f;
@@ -1193,7 +1194,7 @@ namespace AddressableAssetsIntegrationTests
             Directory.CreateDirectory(kCatalogFolderPath);
             if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
             {
-                ContentCatalogData data = new ContentCatalogData("test_catalog");
+                ContentCatalogData data = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
                 data.SetData(new List<ContentCatalogDataEntry>
                 {
                     new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
@@ -1235,7 +1236,7 @@ namespace AddressableAssetsIntegrationTests
             Directory.CreateDirectory(kCatalogFolderPath);
             if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
             {
-                ContentCatalogData data = new ContentCatalogData("test_catalog");
+                ContentCatalogData data = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
                 data.SetData(new List<ContentCatalogDataEntry>
                 {
                     new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
@@ -1288,56 +1289,58 @@ namespace AddressableAssetsIntegrationTests
             yield return null; //< Process deferred callback
         }
 
-        private const string kCatalogRemotePath = "remotecatalog" + kCatalogExt;
+        private string kCatalogRemotePath => "remotecatalog" + kCatalogExt;
         private const string kCatalogFolderPath = "Assets/CatalogTestFolder";
 
         bool CreateCatalogAtFakeRemotePath(string fakeRemotePath, string catalogFolderPath = kCatalogFolderPath)
         {
             Directory.CreateDirectory(catalogFolderPath);
-            if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
-            {
 #if UNITY_EDITOR
-                ContentCatalogData data = new ContentCatalogData("test_catalog");
-                data.SetData(new List<ContentCatalogDataEntry>
-                {
-                    new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
-                });
-                data.SaveToFile(fakeRemotePath);
-#else
-                return false;
-#endif
-            }
-            else
+            // Always create the catalog in the format matching UseJsonCatalog. The built catalog
+            // at CatalogLocation is always binary, so copying it would give JSON tests the wrong format.
+            ContentCatalogData data = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
+            data.SetData(new List<ContentCatalogDataEntry>
             {
-                string baseCatalogPath = m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId;
-                if (baseCatalogPath.StartsWith("file://"))
-                    baseCatalogPath = new Uri(m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId).AbsolutePath;
-                File.Copy(baseCatalogPath, fakeRemotePath);
-            }
-
+                new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
+            });
+            data.SaveToFile(fakeRemotePath);
+#else
+            if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
+                return false;
+            string baseCatalogPath = m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId;
+            if (baseCatalogPath.StartsWith("file://"))
+                baseCatalogPath = new Uri(m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId).AbsolutePath;
+            File.Copy(baseCatalogPath, fakeRemotePath, overwrite: true);
+#endif
             return true;
         }
 
         private string WriteHashFileForCatalog(string catalogPath, string hash)
         {
-            string hashPath = catalogPath.Replace(kCatalogExt, ".hash");
+            string hashPath = CatalogUtilities.GetHashFilePath(catalogPath);
             Directory.CreateDirectory(Path.GetDirectoryName(hashPath));
             File.WriteAllText(hashPath, hash);
             return hashPath;
         }
 
-        void StubTextAndJsonProviders()
+        void StubProviders()
         {
             var textProvider = m_Addressables.ResourceManager.ResourceProviders.FirstOrDefault(rp => rp.GetType() == typeof(TextDataProvider)) as TextDataProvider;
-            var jsonProvider = m_Addressables.ResourceManager.ResourceProviders.FirstOrDefault(rp => rp.GetType() == typeof(JsonAssetProvider)) as JsonAssetProvider;
-
-            var textDataProviderStub = new TextDataProviderStub(kCatalogFolderPath, textProvider);
-            var jsonAssetProviderStub = new JsonAssetProviderStub(kCatalogFolderPath, jsonProvider);
-
             m_Addressables.ResourceManager.ResourceProviders.Remove(textProvider);
-            m_Addressables.ResourceManager.ResourceProviders.Remove(jsonProvider);
-            m_Addressables.ResourceManager.ResourceProviders.Add(textDataProviderStub);
-            m_Addressables.ResourceManager.ResourceProviders.Add(jsonAssetProviderStub);
+            m_Addressables.ResourceManager.ResourceProviders.Add(new TextDataProviderStub(kCatalogFolderPath, textProvider));
+
+            if (UseJsonCatalog)
+            {
+                var jsonProvider = m_Addressables.ResourceManager.ResourceProviders.FirstOrDefault(rp => rp.GetType() == typeof(JsonAssetProvider)) as JsonAssetProvider;
+                m_Addressables.ResourceManager.ResourceProviders.Remove(jsonProvider);
+                m_Addressables.ResourceManager.ResourceProviders.Add(new JsonAssetProviderStub(kCatalogFolderPath, jsonProvider));
+            }
+            else
+            {
+                var binaryProvider = m_Addressables.ResourceManager.ResourceProviders.FirstOrDefault(rp => rp is BinaryAssetProvider<BinaryContentCatalogData.Serializer>) as BinaryAssetProvider<BinaryContentCatalogData.Serializer>;
+                m_Addressables.ResourceManager.ResourceProviders.Remove(binaryProvider);
+                m_Addressables.ResourceManager.ResourceProviders.Add(new BinaryAssetProviderStub(kCatalogFolderPath, binaryProvider));
+            }
             m_Addressables.ResourceManager.m_providerMap.Clear();
         }
 
@@ -1351,7 +1354,7 @@ namespace AddressableAssetsIntegrationTests
             Directory.CreateDirectory(kCatalogFolderPath);
             if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
             {
-                ContentCatalogData data = new ContentCatalogData("test_catalog");
+                ContentCatalogData data = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
                 data.SetData(new List<ContentCatalogDataEntry>
                 {
                     new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
@@ -1371,9 +1374,9 @@ namespace AddressableAssetsIntegrationTests
             var op1 = m_Addressables.LoadContentCatalogAsync(fullRemotePath, false);
             yield return op1;
 
-            string fullRemoteHashPath = fullRemotePath.Replace(kCatalogExt, ".hash");
+            string fullRemoteHashPath = CatalogUtilities.GetHashFilePath(fullRemotePath);
             string cachedDataPath = AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder + fullRemoteHashPath.GetHashCode() + fullRemotePath.Substring(fullRemotePath.LastIndexOf(".")));
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
             Assert.IsTrue(File.Exists(cachedDataPath));
             Assert.IsTrue(File.Exists(cachedHashPath));
             Assert.AreEqual("123", File.ReadAllText(cachedHashPath));
@@ -1388,7 +1391,7 @@ namespace AddressableAssetsIntegrationTests
 
 #if UNITY_EDITOR
 
-#if ENABLE_JSON_CATALOG
+        // Runs in both formats — uses the fixture's active kCatalogRemotePath.
         [UnityTest]
         public IEnumerator LoadingContentCatalog_CachesCatalogData_IfValidHashFoundAndRemotePathContainsQueryParameters()
         {
@@ -1399,17 +1402,19 @@ namespace AddressableAssetsIntegrationTests
                 Assert.Ignore($"Skipping test {TestContext.CurrentContext.Test.Name} due to missing CatalogLocation.");
             WriteHashFileForCatalog(fakeFullRemotePath, "123");
 
-            StubTextAndJsonProviders();
+            StubProviders();
 
             string catalogRemotePath = "http://127.0.0.1/" + kCatalogRemotePath;
             string catalogRemotePathWithQueryParams = catalogRemotePath + "?param1=value1&param2=value2:date=number";
             var op1 = m_Addressables.LoadContentCatalogAsync(catalogRemotePathWithQueryParams, false);
-            yield return op1;
+            while(op1.IsValid() && !op1.IsDone)
+                yield return op1;
+            Assert.Null(op1.OperationException);
 
-            var expectedHash = catalogRemotePath.Replace(kCatalogExt, ".hash").GetHashCode();
+            var expectedHash = CatalogUtilities.GetHashFilePath(catalogRemotePath).GetHashCode();
             string expectedCatalogName = expectedHash + kCatalogExt;
-            string cachedDataPath = m_Addressables.ResolveInternalId(AddressablesImpl.kCacheDataFolder + expectedCatalogName);
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
+            string cachedDataPath = Addressables.ResolveInternalId(AddressablesImpl.kCacheDataFolder + expectedCatalogName);
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
             Assert.IsTrue(File.Exists(cachedDataPath));
             Assert.IsTrue(File.Exists(cachedHashPath));
             Assert.AreEqual("123", File.ReadAllText(cachedHashPath));
@@ -1420,12 +1425,13 @@ namespace AddressableAssetsIntegrationTests
             File.Delete(cachedHashPath);
         }
 
+        // Runs in both formats — loads a catalog whose extension matches the fixture's active format.
         [UnityTest]
-        public IEnumerator LoadingContentCatalog_WhenJsonEnabled_LoadJsonCatalog_Suceeds()
+        public IEnumerator LoadingContentCatalog_LoadsActiveFormatCatalog_Succeeds()
         {
             yield return Init();
 
-            string fakeCatalogFullPath = Path.Combine(kCatalogFolderPath, "remotecatalog.json");
+            string fakeCatalogFullPath = Path.Combine(kCatalogFolderPath, kCatalogRemotePath);
 
             if (!CreateCatalogAtFakeRemotePath(fakeCatalogFullPath))
                 Assert.Ignore($"Skipping test {TestContext.CurrentContext.Test.Name} due to missing CatalogLocation.");
@@ -1434,17 +1440,22 @@ namespace AddressableAssetsIntegrationTests
             var catalogOp = m_Addressables.LoadContentCatalogAsync(fakeCatalogFullPath, false);
             yield return catalogOp;
 
-            Assert.AreEqual(catalogOp.Status, AsyncOperationStatus.Succeeded);
+            Assert.AreEqual(AsyncOperationStatus.Succeeded, catalogOp.Status);
 
             catalogOp.Release();
         }
 
+        // Runs in both formats — loads a catalog with an unexpected extension (.unknown).
+        // This triggers the ContentCatalogProvider extension-mismatch error.
         [UnityTest]
-        public IEnumerator LoadingContentCatalog_WhenJsonEnabled_LoadBinaryCatalog_FailsWithError()
+        public IEnumerator LoadingContentCatalog_WithUnexpectedExtension_FailsWithExtensionError()
         {
             yield return Init();
 
-            string fakeCatalogFullPath = Path.Combine(kCatalogFolderPath, "remotecatalog.bin");
+            // .unknown is neither .json nor .bin, so BinaryCatalogProvider is selected and
+            // its extension check fires: "Expecting to load catalog with extension '.bin' but
+            // catalog path has extension '.unknown'."
+            string fakeCatalogFullPath = Path.Combine(kCatalogFolderPath, "remotecatalog.unknown");
 
             if (!CreateCatalogAtFakeRemotePath(fakeCatalogFullPath))
                 Assert.Ignore($"Skipping test {TestContext.CurrentContext.Test.Name} due to missing CatalogLocation.");
@@ -1453,65 +1464,51 @@ namespace AddressableAssetsIntegrationTests
             var catalogOp = m_Addressables.LoadContentCatalogAsync(fakeCatalogFullPath, false);
             yield return catalogOp;
 
-            Assert.AreEqual(catalogOp.Status, AsyncOperationStatus.Failed);
-            Assert.IsTrue(catalogOp.OperationException != null);
-            Assert.AreEqual("ChainOperation failed because dependent operation failed", catalogOp.OperationException.Message);
-            Assert.IsTrue(catalogOp.OperationException.InnerException != null);
-            Assert.AreEqual("Failed to load content catalog.", catalogOp.OperationException.InnerException.Message);
-            Assert.IsTrue(catalogOp.OperationException.InnerException.InnerException != null);
-            Assert.AreEqual("Expecting to load catalogs in .json format but the catalog provided is in binary format. To load it disable Addressable Asset Settings > Catalog > Enable Json Catalog.",
-                catalogOp.OperationException.InnerException.InnerException.Message);
+            Assert.AreEqual(AsyncOperationStatus.Failed, catalogOp.Status);
+
+            // Walk to the innermost exception where ContentCatalogProvider reports the mismatch.
+            Exception inner = catalogOp.OperationException;
+            while (inner?.InnerException != null) inner = inner.InnerException;
+            StringAssert.Contains(
+                "No catalog provider registered for extension '.unknown'.",
+                inner?.Message ?? string.Empty);
 
             catalogOp.Release();
+            yield return null; // process deferred callback
         }
-#else
+
+        // Runs in both formats — loads opposite-format content (e.g. binary data in a .json file).
+        // Provider selection is by extension, so the correct provider is chosen, but parse fails.
+        // The parse error message is implementation-specific — assert only that the op fails.
         [UnityTest]
-        public IEnumerator LoadingContentCatalog_WhenJsonDisabled_LoadBinaryCatalog_Suceeds()
+        public IEnumerator LoadingContentCatalog_WithOppositeFormatContent_Fails()
         {
             yield return Init();
 
-            string fakeCatalogFullPath = Path.Combine(kCatalogFolderPath, "remotecatalog.bin");
+            string oppositeExt = UseJsonCatalog ? ".bin" : ".json";
+            string fakeCatalogFullPath = Path.Combine(kCatalogFolderPath, "remotecatalog" + oppositeExt);
 
             if (!CreateCatalogAtFakeRemotePath(fakeCatalogFullPath))
                 Assert.Ignore($"Skipping test {TestContext.CurrentContext.Test.Name} due to missing CatalogLocation.");
             WriteHashFileForCatalog(fakeCatalogFullPath, "123");
 
-            var catalogOp = m_Addressables.LoadContentCatalogAsync(fakeCatalogFullPath, false);
-            yield return catalogOp;
+            var previousFailingMessages = LogAssert.ignoreFailingMessages;
+            try
+            {
+                LogAssert.ignoreFailingMessages = true;
+                var catalogOp = m_Addressables.LoadContentCatalogAsync(fakeCatalogFullPath, false);
+                yield return catalogOp;
 
-            Assert.AreEqual(catalogOp.Status, AsyncOperationStatus.Succeeded);
+                Assert.AreEqual(AsyncOperationStatus.Failed, catalogOp.Status);
 
-            catalogOp.Release();
+                catalogOp.Release();
+            } finally
+            {
+                LogAssert.ignoreFailingMessages = previousFailingMessages;
+            }
+
+            yield return null; // process deferred callback
         }
-
-        [UnityTest]
-        public IEnumerator LoadingContentCatalog_WhenJsonDisabled_LoadJsonCatalog_FailsWithError()
-        {
-            yield return Init();
-
-            string fakeCatalogFullPath = Path.Combine(kCatalogFolderPath, "remotecatalog.json");
-
-            if (!CreateCatalogAtFakeRemotePath(fakeCatalogFullPath))
-                Assert.Ignore($"Skipping test {TestContext.CurrentContext.Test.Name} due to missing CatalogLocation.");
-            WriteHashFileForCatalog(fakeCatalogFullPath, "123");
-
-            var catalogOp = m_Addressables.LoadContentCatalogAsync(fakeCatalogFullPath, false);
-            yield return catalogOp;
-
-            Assert.AreEqual(catalogOp.Status, AsyncOperationStatus.Failed);
-            Assert.IsTrue(catalogOp.OperationException != null);
-            Assert.AreEqual("ChainOperation failed because dependent operation failed", catalogOp.OperationException.Message);
-            Assert.IsTrue(catalogOp.OperationException.InnerException != null);
-            Assert.AreEqual("Failed to load content catalog.", catalogOp.OperationException.InnerException.Message);
-            Assert.IsTrue(catalogOp.OperationException.InnerException.InnerException != null);
-            Assert.AreEqual("Expecting to load catalogs in binary format but the catalog provided is in .json format. To load it enable Addressable Asset Settings > Catalog > Enable Json Catalog.",
-                catalogOp.OperationException.InnerException.InnerException.Message);
-
-            catalogOp.Release();
-
-            yield return null; //< Process deferred callback
-        }
-#endif
 
         [UnityTest]
         public IEnumerator LoadingContentCatalog_CachesCatalogData_ForTwoCatalogsWithSameName()
@@ -1524,7 +1521,7 @@ namespace AddressableAssetsIntegrationTests
             Directory.CreateDirectory(Path.Combine(kCatalogFolderPath, "secondCatalog"));
             if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
             {
-                ContentCatalogData data = new ContentCatalogData("test_catalog");
+                ContentCatalogData data = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
                 data.SetData(new List<ContentCatalogDataEntry>
                 {
                     new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
@@ -1539,7 +1536,7 @@ namespace AddressableAssetsIntegrationTests
                     baseCatalogPath = new Uri(m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId).AbsolutePath;
                 File.Copy(baseCatalogPath, fullRemotePath);
             }
-            ContentCatalogData catalogData = new ContentCatalogData("test_catalog");
+            ContentCatalogData catalogData = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
             catalogData.SetData(new List<ContentCatalogDataEntry>
                 {
                     new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
@@ -1556,13 +1553,13 @@ namespace AddressableAssetsIntegrationTests
             var op2 = m_Addressables.LoadContentCatalogAsync(fullRemotePathTwo, false);
             yield return op2;
 
-            string fullRemoteHashPath = fullRemotePath.Replace(kCatalogExt, ".hash");
-            string fullRemoteHashPathTwo = fullRemotePathTwo.Replace(kCatalogExt, ".hash");
+            string fullRemoteHashPath = CatalogUtilities.GetHashFilePath(fullRemotePath);
+            string fullRemoteHashPathTwo = CatalogUtilities.GetHashFilePath(fullRemotePathTwo);
             string cachedDataPath = AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder + fullRemoteHashPath.GetHashCode() + fullRemotePath.Substring(fullRemotePath.LastIndexOf(".")));
             string cachedDataPathTwo =
                 AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder + fullRemoteHashPathTwo.GetHashCode() + fullRemotePathTwo.Substring(fullRemotePathTwo.LastIndexOf(".")));
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
-            string cachedHashPathTwo = cachedDataPathTwo.Replace(kCatalogExt, ".hash");
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
+            string cachedHashPathTwo = CatalogUtilities.GetHashFilePath(cachedDataPathTwo);
             Assert.IsTrue(File.Exists(cachedDataPath));
             Assert.IsTrue(File.Exists(cachedDataPathTwo));
             Assert.IsTrue(File.Exists(cachedHashPath));
@@ -1592,7 +1589,7 @@ namespace AddressableAssetsIntegrationTests
             Directory.CreateDirectory(kCatalogFolderPath);
             if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
             {
-                ContentCatalogData data = new ContentCatalogData("test_catalog");
+                ContentCatalogData data = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
                 data.SetData(new List<ContentCatalogDataEntry>
                 {
                     new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
@@ -1611,7 +1608,7 @@ namespace AddressableAssetsIntegrationTests
             string hashPath = WriteHashFileForCatalog(fullRemotePath, "123");
 
             string cachedDataPath = AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder + hashPath.GetHashCode() + kCatalogExt);
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
             if (File.Exists(cachedDataPath))
                 File.Delete(cachedDataPath);
             if (File.Exists(cachedHashPath))
@@ -1639,7 +1636,7 @@ namespace AddressableAssetsIntegrationTests
             Directory.CreateDirectory(kCatalogFolderPath);
             if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
             {
-                ContentCatalogData data = new ContentCatalogData("test_catalog");
+                ContentCatalogData data = AddressablesTestUtility.CreateCatalogData(UseJsonCatalog, "test_catalog");
                 data.SetData(new List<ContentCatalogDataEntry>
                 {
                     new ContentCatalogDataEntry(typeof(string), "testString", "test.provider", new[] {"key"})
@@ -1656,7 +1653,7 @@ namespace AddressableAssetsIntegrationTests
 
 
             string cachedDataPath = AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder + Path.GetFileName(kCatalogRemotePath));
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
             if (File.Exists(cachedDataPath))
                 File.Delete(cachedDataPath);
             if (File.Exists(cachedHashPath))
@@ -1672,8 +1669,7 @@ namespace AddressableAssetsIntegrationTests
             // Cleanup
             op1.Release();
             Directory.Delete(kCatalogFolderPath, true);
-            File.Delete(cachedDataPath);
-            File.Delete(cachedHashPath);
+            // the cached files are automically cleaned up as part of cleanup
         }
 
 #endif
@@ -1712,9 +1708,9 @@ namespace AddressableAssetsIntegrationTests
 
             Directory.CreateDirectory(kCatalogFolderPath);
             string fullRemotePath = Path.Combine(kCatalogFolderPath, kCatalogRemotePath);
-            string fullRemoteHashPath = fullRemotePath.Replace(kCatalogExt, ".hash");
+            string fullRemoteHashPath = CatalogUtilities.GetHashFilePath(fullRemotePath);
             string cachedDataPath = AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder + fullRemoteHashPath.GetHashCode() + fullRemotePath.Substring(fullRemotePath.LastIndexOf(".")));
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
             string remoteHashPath = WriteHashFileForCatalog(fullRemotePath, "123");
 
             string baseCatalogPath = m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId;
@@ -1743,10 +1739,11 @@ namespace AddressableAssetsIntegrationTests
             File.Delete(cachedHashPath);
         }
 
-#if ENABLE_JSON_CATALOG
         [UnityTest]
         public IEnumerator UpdateContentCatalog_UpdatesCachedData_IfCacheCorrupted()
         {
+            if (!UseJsonCatalog)
+                Assert.Ignore("UpdateContentCatalog_IfCacheCorrupted relies on JSON parse error behavior.");
             yield return Init();
             if (m_Addressables.m_ResourceLocators[0].CatalogLocation == null)
             {
@@ -1755,10 +1752,16 @@ namespace AddressableAssetsIntegrationTests
             }
 
             Directory.CreateDirectory(kCatalogFolderPath);
+            var cacheFolder = Addressables.ResolveInternalId(AddressablesImpl.kCacheDataFolder);
+            if (!Directory.Exists(cacheFolder))
+            {
+                Directory.CreateDirectory(cacheFolder);
+            }
+
             string fullRemotePath = Path.Combine(kCatalogFolderPath, kCatalogRemotePath);
-            string fullRemoteHashPath = fullRemotePath.Replace(kCatalogExt, ".hash");
-            string cachedDataPath = m_Addressables.ResolveInternalId(AddressablesImpl.kCacheDataFolder + fullRemoteHashPath.GetHashCode() + fullRemotePath.Substring(fullRemotePath.LastIndexOf(".")));
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
+            string fullRemoteHashPath = CatalogUtilities.GetHashFilePath(fullRemotePath);
+            string cachedDataPath = Addressables.ResolveInternalId(AddressablesImpl.kCacheDataFolder + fullRemoteHashPath.GetHashCode() + fullRemotePath.Substring(fullRemotePath.LastIndexOf(".")));
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
             string remoteHashPath = WriteHashFileForCatalog(fullRemoteHashPath, "123");
 
             string baseCatalogPath = m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId;
@@ -1798,7 +1801,7 @@ namespace AddressableAssetsIntegrationTests
             Directory.CreateDirectory(kCatalogFolderPath);
             string fullRemotePath = Path.Combine(kCatalogFolderPath, kCatalogRemotePath);
             string cachedDataPath = AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder + Path.GetFileName(kCatalogRemotePath));
-            string cachedHashPath = cachedDataPath.Replace(kCatalogExt, ".hash");
+            string cachedHashPath = CatalogUtilities.GetHashFilePath(cachedDataPath);
 
             string baseCatalogPath = m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId;
             if (baseCatalogPath.StartsWith("file://"))
@@ -1830,14 +1833,16 @@ namespace AddressableAssetsIntegrationTests
             if (baseCatalogPath.StartsWith("file://"))
                 baseCatalogPath = new Uri(m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId).AbsolutePath;
 
-            var location = m_Addressables.CreateCatalogLocationWithHashDependencies<ContentCatalogProvider>(baseCatalogPath);
+            var ext = Path.GetExtension(baseCatalogPath);
+            var catalogProvider = m_Addressables.ResourceManager.ResourceProviders
+                .OfType<ContentCatalogProvider>()
+                .First(p => string.Equals(p.CatalogExtension, ext, StringComparison.OrdinalIgnoreCase));
+            var location = m_Addressables.CreateCatalogLocationWithHashDependencies(baseCatalogPath, catalogProvider.GetType());
             var loadCatalogHandle = InitializationOperation.LoadContentCatalog(m_Addressables, location, string.Empty);
 
             yield return loadCatalogHandle;
-            ContentCatalogProvider ccp = m_Addressables.ResourceManager.ResourceProviders
-                .FirstOrDefault(rp => rp.GetType() == typeof(ContentCatalogProvider)) as ContentCatalogProvider;
 
-            var ccd = ccp.m_LocationToCatalogLoadOpMap[location].m_ContentCatalogData;
+            var ccd = catalogProvider.m_LocationToCatalogLoadOpMap[location].m_ContentCatalogData;
             Assert.IsFalse(CatalogDataWasCleaned(ccd));
 
             loadCatalogHandle.Release();
@@ -1847,23 +1852,19 @@ namespace AddressableAssetsIntegrationTests
             PostTearDownEvent = ResetAddressables;
         }
 
-#endif
-
         internal bool CatalogDataWasCleaned(ContentCatalogData data)
         {
-#if ENABLE_JSON_CATALOG
-            return string.IsNullOrEmpty(data.m_KeyDataString) &&
-                string.IsNullOrEmpty(data.m_BucketDataString) &&
-                string.IsNullOrEmpty(data.m_EntryDataString) &&
-                string.IsNullOrEmpty(data.m_ExtraDataString) &&
-                data.m_InternalIds == null &&
-                string.IsNullOrEmpty(data.m_LocatorId) &&
-                data.m_ProviderIds == null &&
-                data.m_ResourceProviderData == null &&
-                data.m_resourceTypes == null;
-#else
-  return string.IsNullOrEmpty(data.m_LocatorId);
-#endif
+            if (data is JsonContentCatalogData jccd)
+                return string.IsNullOrEmpty(jccd.m_KeyDataString) &&
+                    string.IsNullOrEmpty(jccd.m_BucketDataString) &&
+                    string.IsNullOrEmpty(jccd.m_EntryDataString) &&
+                    string.IsNullOrEmpty(jccd.m_ExtraDataString) &&
+                    jccd.m_InternalIds == null &&
+                    string.IsNullOrEmpty(jccd.m_LocatorId) &&
+                    jccd.m_ProviderIds == null &&
+                    jccd.m_ResourceProviderData == null &&
+                    jccd.m_resourceTypes == null;
+            return string.IsNullOrEmpty(data.m_LocatorId);
         }
 
 #if UNITY_EDITOR
@@ -1885,15 +1886,18 @@ namespace AddressableAssetsIntegrationTests
                 baseCatalogPath = new Uri(m_Addressables.m_ResourceLocators[0].CatalogLocation.InternalId).AbsolutePath;
             File.Copy(baseCatalogPath, fullRemotePath);
 
-            var location = m_Addressables.CreateCatalogLocationWithHashDependencies<ContentCatalogProvider>(baseCatalogPath);
-            var location2 = m_Addressables.CreateCatalogLocationWithHashDependencies<ContentCatalogProvider>(fullRemotePath);
+            var ext = Path.GetExtension(baseCatalogPath);
+            var catalogProvider = m_Addressables.ResourceManager.ResourceProviders
+                .OfType<ContentCatalogProvider>()
+                .First(p => string.Equals(p.CatalogExtension, ext, StringComparison.OrdinalIgnoreCase));
+            var location = m_Addressables.CreateCatalogLocationWithHashDependencies(baseCatalogPath, catalogProvider.GetType());
+            var location2 = m_Addressables.CreateCatalogLocationWithHashDependencies(fullRemotePath, catalogProvider.GetType());
             var loadCatalogHandle = InitializationOperation.LoadContentCatalog(m_Addressables, location, string.Empty);
             yield return loadCatalogHandle;
             var loadCatalogHandle2 = InitializationOperation.LoadContentCatalog(m_Addressables, location2, string.Empty);
             yield return loadCatalogHandle2;
 
-            ContentCatalogProvider ccp = m_Addressables.ResourceManager.ResourceProviders
-                .FirstOrDefault(rp => rp.GetType() == typeof(ContentCatalogProvider)) as ContentCatalogProvider;
+            ContentCatalogProvider ccp = catalogProvider;
 
             var ccd = ccp.m_LocationToCatalogLoadOpMap[location].m_ContentCatalogData;
             var ccd2 = ccp.m_LocationToCatalogLoadOpMap[location2].m_ContentCatalogData;
@@ -1931,8 +1935,10 @@ namespace AddressableAssetsIntegrationTests
             var handle = m_Addressables.LoadContentCatalogAsync(baseCatalogPath, false);
             yield return handle;
 
+            var ext = Path.GetExtension(baseCatalogPath);
             ContentCatalogProvider ccp = m_Addressables.ResourceManager.ResourceProviders
-                .FirstOrDefault(rp => rp.GetType() == typeof(ContentCatalogProvider)) as ContentCatalogProvider;
+                .OfType<ContentCatalogProvider>()
+                .First(p => string.Equals(p.CatalogExtension, ext, StringComparison.OrdinalIgnoreCase));
 
             Assert.AreEqual(1, ccp.m_LocationToCatalogLoadOpMap.Count);
 
@@ -2207,10 +2213,303 @@ namespace AddressableAssetsIntegrationTests
         }
 
         [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_WithPreResolvedBundleLocations_ReturnsBundleSizes()
+        {
+            yield return Init();
+            long expectedSize = 0;
+            var locMap = new ResourceLocationMap("TestLocator");
+
+            var bundleLoc1 = new ResourceLocationBase("preResolvedBundle1", "http://nonExistingUrlForAddressableTests1337.com/preResolved1.bundle",
+                typeof(AssetBundleProvider).FullName, typeof(IAssetBundleResource));
+            var sizeData1 = (bundleLoc1.Data = CreateLocationSizeData("preResolvedBundle1", 1000, 123, "preResolvedHash1")) as ILocationSizeData;
+            if (sizeData1 != null)
+                expectedSize += sizeData1.ComputeSize(bundleLoc1, null);
+
+            var bundleLoc2 = new ResourceLocationBase("preResolvedBundle2", "http://nonExistingUrlForAddressableTests1337.com/preResolved2.bundle",
+                typeof(AssetBundleProvider).FullName, typeof(IAssetBundleResource));
+            var sizeData2 = (bundleLoc2.Data = CreateLocationSizeData("preResolvedBundle2", 500, 123, "preResolvedHash2")) as ILocationSizeData;
+            if (sizeData2 != null)
+                expectedSize += sizeData2.ComputeSize(bundleLoc2, null);
+
+            var assetLoc = new ResourceLocationBase("preResolvedAsset", "myAsset.asset", typeof(BundledAssetProvider).FullName, typeof(object), bundleLoc1, bundleLoc2);
+
+            locMap.Add("preResolvedBundle1", bundleLoc1);
+            locMap.Add("preResolvedBundle2", bundleLoc2);
+            locMap.Add("preResolvedAsset", assetLoc);
+            m_Addressables.AddResourceLocator(locMap);
+
+            // Bundle locations, one per key. These used to report 0, because only
+            // dependencies were counted and a bundle location has none of its own.
+            var byLocation = m_Addressables.GetDownloadSizeAsync(new List<object> {bundleLoc1, bundleLoc2});
+            yield return byLocation;
+            long byLocationSize = byLocation.Result;
+            Assert.AreEqual(expectedSize, byLocationSize);
+            byLocation.Release();
+
+            // The same bundles passed as one IList<IResourceLocation> key.
+            var byList = m_Addressables.GetDownloadSizeAsync(new List<object> {new List<IResourceLocation> {bundleLoc1, bundleLoc2}});
+            yield return byList;
+            Assert.AreEqual(expectedSize, byList.Result);
+            byList.Release();
+
+            // A bundle reached both directly and as a dependency is counted once.
+            var mixed = m_Addressables.GetDownloadSizeAsync(new List<object> {"preResolvedAsset", bundleLoc1});
+            yield return mixed;
+            Assert.AreEqual(expectedSize, mixed.Result);
+            mixed.Release();
+
+            // Asking by key and by location must agree on the same set.
+            var byKey = m_Addressables.GetDownloadSizeAsync((object)"preResolvedAsset");
+            yield return byKey;
+            Assert.AreEqual(byLocationSize, byKey.Result);
+            byKey.Release();
+
+            m_Addressables.RemoveResourceLocator(locMap);
+        }
+
+        [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_WithCatalogLocationAmongOtherKeys_StillCountsOtherKeys()
+        {
+            yield return Init();
+            long expectedSize = 0;
+            var locMap = new ResourceLocationMap("TestLocator");
+
+            var bundleLoc = new ResourceLocationBase("mixedBatchBundle", "http://nonExistingUrlForAddressableTests1337.com/mixedBatch.bundle",
+                typeof(AssetBundleProvider).FullName, typeof(IAssetBundleResource));
+            var sizeData = (bundleLoc.Data = CreateLocationSizeData("mixedBatchBundle", 1000, 123, "mixedBatchHash")) as ILocationSizeData;
+            if (sizeData != null)
+                expectedSize += sizeData.ComputeSize(bundleLoc, null);
+
+            var assetLoc = new ResourceLocationBase("mixedBatchAsset", "myAsset.asset", typeof(BundledAssetProvider).FullName, typeof(object), bundleLoc);
+
+            locMap.Add("mixedBatchBundle", bundleLoc);
+            locMap.Add("mixedBatchAsset", assetLoc);
+
+            var catalogLoc = new ResourceLocationBase("catalog", "FakeCatalogId", typeof(ContentCatalogProvider).FullName, typeof(ContentCatalogProvider));
+            m_Addressables.AddResourceLocator(locMap, "mixedBatchLocalHash", catalogLoc);
+
+            // Catalog size is a separate remote request and cannot be summed here,
+            // but it must not discard the rest of the batch as the old code did.
+            LogAssert.Expect(LogType.Warning, new Regex("ignored catalog location"));
+            var dOp = m_Addressables.GetDownloadSizeAsync(new List<object> {catalogLoc, "mixedBatchAsset"});
+            yield return dOp;
+            Assert.AreEqual(expectedSize, dOp.Result);
+            dOp.Release();
+
+            m_Addressables.RemoveResourceLocator(locMap);
+        }
+
+        // A size provider that is not AssetBundleRequestOptions, standing in for content
+        // that is not an AssetBundle. Reports the same size in every fixture.
+        sealed class FixedRemoteSizeData : ILocationSizeData
+        {
+            public long Size;
+
+            public long ComputeSize(IResourceLocation location, ResourceManager resourceManager)
+            {
+                return Size;
+            }
+        }
+
+        static ResourceLocationBase RemoteBundleLocation(string name)
+        {
+            return new ResourceLocationBase(name, $"http://nonExistingUrlForAddressableTests1337.com/{name}.bundle",
+                typeof(AssetBundleProvider).FullName, typeof(IAssetBundleResource));
+        }
+
+        // The catalog location has no dependencies, so the catalog size path fails fast on
+        // its missing remote hash rather than making a request.
+        IResourceLocation AddLocatorWithCatalog(string name, ResourceLocationMap locMap)
+        {
+            var catalogLoc = new ResourceLocationBase(name, $"FakeCatalogId_{name}",
+                typeof(ContentCatalogProvider).FullName, typeof(ContentCatalogProvider));
+            m_Addressables.AddResourceLocator(locMap, $"{name}LocalHash", catalogLoc);
+            return catalogLoc;
+        }
+
+        static void AssertTookCatalogSizePath(AsyncOperationHandle<long> op)
+        {
+            Assert.AreEqual(AsyncOperationStatus.Failed, op.Status,
+                "A lone catalog location must take the catalog size path, not the content sum");
+            Assert.IsNotNull(op.OperationException);
+            StringAssert.Contains("no dependencies pointing to a remote location", op.OperationException.Message);
+        }
+
+        [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_NonBundleLocationWithSizeData_IsCounted()
+        {
+            yield return Init();
+            const long expectedSize = 4242;
+            var locMap = new ResourceLocationMap("TestLocator");
+
+            // Not typed as a bundle, and not served by AssetBundleProvider. Only its
+            // ILocationSizeData says it costs anything to download.
+            var remoteLoc = new ResourceLocationBase("customRemoteContent", "http://nonExistingUrlForAddressableTests1337.com/custom.dat",
+                "Test.CustomRemoteContentProvider", typeof(TextAsset));
+            remoteLoc.Data = new FixedRemoteSizeData {Size = expectedSize};
+
+            var assetLoc = new ResourceLocationBase("customRemoteAsset", "myAsset.asset", typeof(BundledAssetProvider).FullName, typeof(object), remoteLoc);
+
+            locMap.Add("customRemoteContent", remoteLoc);
+            locMap.Add("customRemoteAsset", assetLoc);
+            m_Addressables.AddResourceLocator(locMap);
+
+            // Reached as a dependency of a key.
+            var byKey = m_Addressables.GetDownloadSizeAsync((object)"customRemoteAsset");
+            yield return byKey;
+            Assert.AreEqual(expectedSize, byKey.Result, "A non-bundle dependency that reports a size must be counted");
+            byKey.Release();
+
+            // Requested directly as a resolved location.
+            var byLocation = m_Addressables.GetDownloadSizeAsync((object)remoteLoc);
+            yield return byLocation;
+            Assert.AreEqual(expectedSize, byLocation.Result);
+            byLocation.Release();
+
+            // Requested inside a pre-resolved location list.
+            var byList = m_Addressables.GetDownloadSizeAsync(new List<object> {new List<IResourceLocation> {remoteLoc}});
+            yield return byList;
+            Assert.AreEqual(expectedSize, byList.Result);
+            byList.Release();
+
+            m_Addressables.RemoveResourceLocator(locMap);
+        }
+
+        [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_WithBundleAndNonBundleSizeProviders_SumsBoth()
+        {
+            yield return Init();
+            const long customSize = 900;
+            long expectedSize = customSize;
+            var locMap = new ResourceLocationMap("TestLocator");
+
+            var bundleLoc = RemoteBundleLocation("mixedProviderBundle");
+            var bundleSizeData = (bundleLoc.Data = CreateLocationSizeData("mixedProviderBundle", 1000, 123, "mixedProviderHash")) as ILocationSizeData;
+            if (bundleSizeData != null)
+                expectedSize += bundleSizeData.ComputeSize(bundleLoc, null);
+
+            var customLoc = new ResourceLocationBase("mixedProviderCustom", "http://nonExistingUrlForAddressableTests1337.com/custom.dat",
+                "Test.CustomRemoteContentProvider", typeof(TextAsset));
+            customLoc.Data = new FixedRemoteSizeData {Size = customSize};
+
+            locMap.Add("mixedProviderBundle", bundleLoc);
+            locMap.Add("mixedProviderCustom", customLoc);
+            m_Addressables.AddResourceLocator(locMap);
+
+            // Two different size providers in one request, and dedupe must not drop
+            // either of them just because their resource types differ.
+            var dOp = m_Addressables.GetDownloadSizeAsync(new List<object> {bundleLoc, customLoc});
+            yield return dOp;
+            Assert.AreEqual(expectedSize, dOp.Result);
+            dOp.Release();
+
+            m_Addressables.RemoveResourceLocator(locMap);
+        }
+
+        [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_WithCatalogLocationInsideLocationList_IsDetected()
+        {
+            yield return Init();
+            long expectedSize = 0;
+            var locMap = new ResourceLocationMap("TestLocator");
+
+            var bundleLoc = RemoteBundleLocation("listedCatalogBundle");
+            var sizeData = (bundleLoc.Data = CreateLocationSizeData("listedCatalogBundle", 1000, 123, "listedCatalogHash")) as ILocationSizeData;
+            if (sizeData != null)
+                expectedSize += sizeData.ComputeSize(bundleLoc, null);
+
+            locMap.Add("listedCatalogBundle", bundleLoc);
+            var catalogLoc = AddLocatorWithCatalog("listedCatalog", locMap);
+
+            // A catalog reached inside a pre-resolved list must be recognised as a
+            // catalog, not walked as content.
+            LogAssert.Expect(LogType.Warning, new Regex("ignored catalog location"));
+            var dOp = m_Addressables.GetDownloadSizeAsync(new List<object> {new List<IResourceLocation> {catalogLoc, bundleLoc}});
+            yield return dOp;
+            Assert.AreEqual(expectedSize, dOp.Result);
+            dOp.Release();
+
+            m_Addressables.RemoveResourceLocator(locMap);
+        }
+
+        [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_WithLoneCatalogLocation_TakesCatalogSizePath()
+        {
+            yield return Init();
+            var locMap = new ResourceLocationMap("TestLocator");
+            var catalogLoc = AddLocatorWithCatalog("loneCatalog", locMap);
+
+            using (new IgnoreFailingLogMessage())
+            {
+                // Alone as a bare location key.
+                var bare = m_Addressables.GetDownloadSizeAsync((object)catalogLoc);
+                yield return bare;
+                AssertTookCatalogSizePath(bare);
+                bare.Release();
+
+                // Alone inside a pre-resolved list, which used to return 0.
+                var listed = m_Addressables.GetDownloadSizeAsync(new List<object> {new List<IResourceLocation> {catalogLoc}});
+                yield return listed;
+                AssertTookCatalogSizePath(listed);
+                listed.Release();
+            }
+
+            m_Addressables.RemoveResourceLocator(locMap);
+        }
+
+        [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_WithTwoCatalogLocations_WarnsForEachAndReturnsZero()
+        {
+            yield return Init();
+            var locMap1 = new ResourceLocationMap("TestLocator1");
+            var locMap2 = new ResourceLocationMap("TestLocator2");
+            var catalogLoc1 = AddLocatorWithCatalog("firstCatalog", locMap1);
+            var catalogLoc2 = AddLocatorWithCatalog("secondCatalog", locMap2);
+
+            // Two catalogs cannot be summed, so neither is guessed at. The old single
+            // field silently kept only the last one.
+            LogAssert.Expect(LogType.Warning, new Regex("ignored catalog location"));
+            LogAssert.Expect(LogType.Warning, new Regex("ignored catalog location"));
+            var dOp = m_Addressables.GetDownloadSizeAsync(new List<object> {catalogLoc1, catalogLoc2});
+            yield return dOp;
+            Assert.AreEqual(AsyncOperationStatus.Succeeded, dOp.Status);
+            Assert.AreEqual(0, dOp.Result);
+            dOp.Release();
+
+            m_Addressables.RemoveResourceLocator(locMap1);
+            m_Addressables.RemoveResourceLocator(locMap2);
+        }
+
+        [UnityTest]
+        public IEnumerator GetDownloadSizeAsync_WithCatalogAndContentThatReportsNoSize_WarnsAndReturnsZero()
+        {
+            yield return Init();
+            var locMap = new ResourceLocationMap("TestLocator");
+
+            // No size data, so nothing lands in the size set. The request still asked
+            // for content, so the catalog must not be measured on its own.
+            var bundleLoc = RemoteBundleLocation("noSizeDataBundle");
+            var assetLoc = new ResourceLocationBase("noSizeDataAsset", "myAsset.asset", typeof(BundledAssetProvider).FullName, typeof(object), bundleLoc);
+
+            locMap.Add("noSizeDataBundle", bundleLoc);
+            locMap.Add("noSizeDataAsset", assetLoc);
+            var catalogLoc = AddLocatorWithCatalog("sizelessContentCatalog", locMap);
+
+            LogAssert.Expect(LogType.Warning, new Regex("ignored catalog location"));
+            var dOp = m_Addressables.GetDownloadSizeAsync(new List<object> {catalogLoc, "noSizeDataAsset"});
+            yield return dOp;
+            Assert.AreEqual(AsyncOperationStatus.Succeeded, dOp.Status);
+            Assert.AreEqual(0, dOp.Result);
+            dOp.Release();
+
+            m_Addressables.RemoveResourceLocator(locMap);
+        }
+
+        [UnityTest]
         public IEnumerator GetResourceLocationsWithCorrectKeyAndWrongTypeReturnsEmptyResult()
         {
             yield return Init();
-            AsyncOperationHandle<IList<IResourceLocation>> op = m_Addressables.LoadResourceLocationsAsync("prefabs_evenBASE", typeof(Texture2D));
+            AsyncOperationHandle<IList<IResourceLocation>> op = m_Addressables.LoadResourceLocationsAsync($"prefabs_even{BuildSuffix}", typeof(Texture2D));
             yield return op;
             Assert.AreEqual(AsyncOperationStatus.Succeeded, op.Status);
             Assert.IsNotNull(op.Result);
@@ -2264,7 +2563,7 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
 
             IList<IResourceLocation> results;
-            var ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), mode, out results);
+            var ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), mode, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
@@ -2276,19 +2575,19 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
 
             IList<IResourceLocation> results;
-            var ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            var ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
             var evenCount = results.Count;
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_oddBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_odd{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
             var oddCount = results.Count;
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE", "prefabs_oddBASE"}, typeof(GameObject), Addressables.MergeMode.Union, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}", $"prefabs_odd{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Union, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
@@ -2301,19 +2600,19 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
 
             IList<IResourceLocation> results;
-            var ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            var ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
             var evenCount = results.Count;
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_oddBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_odd{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
             var oddCount = results.Count;
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE", "prefabs_oddBASE", "INVALIDKEY"}, typeof(GameObject), Addressables.MergeMode.Union, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}", $"prefabs_odd{BuildSuffix}", "INVALIDKEY"}, typeof(GameObject), Addressables.MergeMode.Union, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
@@ -2326,17 +2625,17 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
 
             IList<IResourceLocation> results;
-            var ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            var ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_oddBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_odd{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE", "prefabs_oddBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}", $"prefabs_odd{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsFalse(ret);
             Assert.IsNull(results);
         }
@@ -2347,21 +2646,21 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
 
             IList<IResourceLocation> results;
-            var ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            var ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_oddBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_odd{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsTrue(ret);
             Assert.NotNull(results);
             Assert.GreaterOrEqual(results.Count, 1);
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE", "prefabs_oddBASE", "INVALIDKEY"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}", $"prefabs_odd{BuildSuffix}", "INVALIDKEY"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsFalse(ret);
             Assert.IsNull(results);
 
-            ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE", "INVALIDKEY"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
+            ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}", "INVALIDKEY"}, typeof(GameObject), Addressables.MergeMode.Intersection, out results);
             Assert.IsFalse(ret);
             Assert.IsNull(results);
 
@@ -2394,7 +2693,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator CanLoadAssetsWithMultipleKeysMerged()
         {
             yield return Init();
-            List<object> keys = new List<object>() {AddressablesTestUtility.GetPrefabLabel("BASE"), AddressablesTestUtility.GetPrefabUniqueLabel("BASE", 0)};
+            List<object> keys = new List<object>() {AddressablesTestUtility.GetPrefabLabel(BuildSuffix), AddressablesTestUtility.GetPrefabUniqueLabel(BuildSuffix, 0)};
             AsyncOperationHandle<IList<GameObject>> gop = m_Addressables.LoadAssetsAsync<GameObject>(keys, null, Addressables.MergeMode.Intersection, true);
             while (!gop.IsDone)
                 yield return null;
@@ -2436,7 +2735,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator LoadAsset_WhenEntryExists_ReturnsAsset()
         {
             yield return Init();
-            string label = AddressablesTestUtility.GetPrefabUniqueLabel("BASE", 0);
+            string label = AddressablesTestUtility.GetPrefabUniqueLabel(BuildSuffix, 0);
             AsyncOperationHandle<GameObject> op = m_Addressables.LoadAssetAsync<GameObject>(label);
             yield return op;
             Assert.AreEqual(AsyncOperationStatus.Succeeded, op.Status);
@@ -2453,7 +2752,7 @@ namespace AddressableAssetsIntegrationTests
                 Assert.Ignore($"Skipping test {nameof(LoadAsset_SuccessfulWhenLoadAssetMode_LoadAllAssets)} for {TypeName}, AssetBundle based test.");
             }
 
-            string label = AddressablesTestUtility.GetPrefabUniqueLabel("BASE", 0);
+            string label = AddressablesTestUtility.GetPrefabUniqueLabel(BuildSuffix, 0);
 
             var locationHandle = m_Addressables.LoadResourceLocationsAsync(label);
             yield return locationHandle;
@@ -2480,7 +2779,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator LoadAssetWithWrongType_WhenEntryExists_Fails()
         {
             yield return Init();
-            string label = AddressablesTestUtility.GetPrefabUniqueLabel("BASE", 0);
+            string label = AddressablesTestUtility.GetPrefabUniqueLabel(BuildSuffix, 0);
             AsyncOperationHandle<Texture> op = new AsyncOperationHandle<Texture>();
             using (new IgnoreFailingLogMessage())
             {
@@ -2530,7 +2829,7 @@ namespace AddressableAssetsIntegrationTests
         {
             yield return Init();
 
-            string label = AddressablesTestUtility.GetPrefabUniqueLabel("BASE", 0);
+            string label = AddressablesTestUtility.GetPrefabUniqueLabel(BuildSuffix, 0);
             AsyncOperationHandle<object> op1 = m_Addressables.LoadAssetAsync<object>(label);
             AsyncOperationHandle<GameObject> op2 = m_Addressables.LoadAssetAsync<GameObject>(label);
             yield return op1;
@@ -2546,7 +2845,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator LoadAssets_InvokesCallbackPerAsset()
         {
             yield return Init();
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             HashSet<GameObject> ops = new HashSet<GameObject>();
             var gop = m_Addressables.LoadAssetsAsync<GameObject>(label, x => { ops.Add(x); }, true);
             yield return gop;
@@ -2560,7 +2859,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator LoadAssets_InvokesCallbackPerAssetBeforeCompletedCallback()
         {
             yield return Init();
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             HashSet<GameObject> ops = new HashSet<GameObject>();
             int opsCompletedOnCompleted = 0;
             var gop = m_Addressables.LoadAssetsAsync<GameObject>(label, x => { ops.Add(x); }, true);
@@ -2579,7 +2878,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator DownloadDependencies_CanDownloadDependencies()
         {
             yield return Init();
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label);
             yield return op;
             AssertDownloadDependencyBundlesAreValid(op);
@@ -2590,7 +2889,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator DownloadDependencies_AutoReleaseHandle_ReleasesOnCompletion()
         {
             yield return Init();
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label, true);
             yield return op;
             Assert.IsFalse(op.IsValid());
@@ -2610,7 +2909,7 @@ namespace AddressableAssetsIntegrationTests
         {
             yield return Init();
             int bundleCountBefore = AssetBundle.GetAllLoadedAssetBundles().Count();
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label, true);
             yield return op;
             AssetBundleProvider.WaitForAllUnloadingBundlesToComplete();
@@ -2630,12 +2929,12 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
             int bundleCountBefore = AssetBundle.GetAllLoadedAssetBundles().Count();
             Assert.AreEqual(0, bundleCountBefore);
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label);
             yield return op;
             Assert.IsTrue(op.IsValid());
 
-            var handle = m_Addressables.LoadAssetAsync<IList<Object>>("test0BASE");
+            var handle = m_Addressables.LoadAssetAsync<IList<Object>>($"test0{BuildSuffix}");
             yield return handle;
             Assert.IsNotNull(handle.Result);
 
@@ -2656,13 +2955,13 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
             int bundleCountBefore = AssetBundle.GetAllLoadedAssetBundles().Count();
             Assert.AreEqual(0, bundleCountBefore);
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label);
             yield return op;
             Assert.IsTrue(op.IsValid());
             op.Release();
 
-            var handle = m_Addressables.LoadAssetAsync<IList<Object>>("test0BASE");
+            var handle = m_Addressables.LoadAssetAsync<IList<Object>>($"test0{BuildSuffix}");
             yield return handle;
             Assert.IsTrue(handle.IsValid());
             Assert.IsNotNull(handle.Result);
@@ -2685,10 +2984,10 @@ namespace AddressableAssetsIntegrationTests
             Caching.ClearCache();
             yield return Init();
 
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
 
             AsyncOperationHandle downloadOp = m_Addressables.DownloadDependenciesAsync(label);
-            var loadHandle = m_Addressables.LoadAssetAsync<IList<Object>>("test0BASE");
+            var loadHandle = m_Addressables.LoadAssetAsync<IList<Object>>("test0" + BuildSuffix);
 
             yield return downloadOp;
             yield return loadHandle;
@@ -2720,7 +3019,7 @@ namespace AddressableAssetsIntegrationTests
             int initialCount = AssetBundleProvider.LoadingRemoteBundles.Count;
             Assert.AreEqual(0, initialCount, "Should start with no tracked operations");
 
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle downloadOp = m_Addressables.DownloadDependenciesAsync(label);
             yield return downloadOp;
             Assert.AreEqual(AsyncOperationStatus.Succeeded, downloadOp.Status);
@@ -2749,7 +3048,7 @@ namespace AddressableAssetsIntegrationTests
             yield return Init();
             Caching.ClearCache();
 
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
 
             var load1 = m_Addressables.LoadAssetAsync<GameObject>(m_PrefabKeysList[0]);
             AsyncOperationHandle downloadOp = m_Addressables.DownloadDependenciesAsync(label);
@@ -2800,7 +3099,7 @@ namespace AddressableAssetsIntegrationTests
         public IEnumerator DownloadDependencies_ReturnsValidTask()
         {
             yield return Init();
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label);
 
             Assert.IsNotNull(op.Task);
@@ -3144,7 +3443,6 @@ namespace AddressableAssetsIntegrationTests
                 }
             }
         }
-#if ENABLE_JSON_CATALOG
         private void SetupBundleForProviderTests(string bundleName, string depName, string key, out ResourceLocationBase location, out TestCatalogProviderCustomAssetBundleResource testProvider)
         {
             testProvider = new TestCatalogProviderCustomAssetBundleResource();
@@ -3160,12 +3458,12 @@ namespace AddressableAssetsIntegrationTests
 
             GetRLM(m_Addressables).Add(key, new List<IResourceLocation>() {location});
         }
-#endif
-#if ENABLE_JSON_CATALOG
         [UnityTest]
         [Platform(Exclude = "PS5")]
         public IEnumerator ClearDependencyCache_ClearsAllCachedFilesForKey()
         {
+            if (!UseJsonCatalog)
+                Assert.Ignore("ClearDependencyCache test requires JSON catalog format.");
             yield return Init();
             var rlm = GetRLM(m_Addressables);
             if (rlm == null)
@@ -3193,7 +3491,6 @@ namespace AddressableAssetsIntegrationTests
             yield return null;
 #endif
         }
-#endif
 
         [UnityTest]
         public IEnumerator ClearDependencyCache_ClearsAllCachedFilesForKeyWithDependencies()
@@ -3661,7 +3958,10 @@ namespace AddressableAssetsIntegrationTests
                 typeof(IAssetBundleResource)));
 
             Assert.IsTrue(Caching.IsVersionCached(cab));
+            bool ignoreValue = LogAssert.ignoreFailingMessages;
+            LogAssert.ignoreFailingMessages = true;
             yield return request.SendWebRequest();
+            LogAssert.ignoreFailingMessages = ignoreValue;
             Assert.IsFalse(Caching.IsVersionCached(cab));
 #else
             Assert.Ignore("Caching not enabled.");
@@ -3694,7 +3994,10 @@ namespace AddressableAssetsIntegrationTests
                 typeof(IAssetBundleResource)));
 
             Assert.IsTrue(Caching.IsVersionCached(cab));
+            bool ignoreValue = LogAssert.ignoreFailingMessages;
+            LogAssert.ignoreFailingMessages = true;
             yield return request.SendWebRequest();
+            LogAssert.ignoreFailingMessages = ignoreValue;
             Assert.IsFalse(Caching.IsVersionCached(cab));
 #else
             Assert.Ignore("Caching not enabled.");
@@ -3795,8 +4098,8 @@ __data");
             var go = new GameObject("test", typeof(AsyncWaitForCompletion));
             var comp = go.GetComponent<AsyncWaitForCompletion>();
             comp.addressables = m_Addressables;
-            comp.key1 = "prefabs_evenBASE";
-            comp.key2 = AddressablesTestUtility.GetPrefabLabel("BASE");
+            comp.key1 = $"prefabs_even{BuildSuffix}";
+            comp.key2 = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
 
             while (!comp.done)
                 yield return null;

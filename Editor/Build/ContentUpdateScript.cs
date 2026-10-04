@@ -7,6 +7,7 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
 using UnityEditor.AddressableAssets.Build.DataBuilders;
+using UnityEditor.AddressableAssets.Build.DataBuilders.SchemaBuilders;
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEditor.Build.Content;
@@ -534,10 +535,13 @@ namespace UnityEditor.AddressableAssets.Build
                 if (!guidToEntries.ContainsKey(entry.guid))
                     guidToEntries[entry.guid] = entry;
 
-            foreach (KeyValuePair<GUID, AssetLoadInfo> assetData in dependencyData.AssetInfo)
-                GetCachedAssetState(guidToCatalogLocation, guidToEntries, assetData.Key, assetData.Value.referencedObjects, gatheredCachedInfos);
-            foreach (KeyValuePair<GUID, SceneDependencyInfo> sceneData in dependencyData.SceneInfo)
-                GetCachedAssetState(guidToCatalogLocation, guidToEntries, sceneData.Key, sceneData.Value.referencedObjects, gatheredCachedInfos);
+            if (dependencyData != null)
+            {
+                foreach (KeyValuePair<GUID, AssetLoadInfo> assetData in dependencyData.AssetInfo)
+                    GetCachedAssetState(guidToCatalogLocation, guidToEntries, assetData.Key, assetData.Value.referencedObjects, gatheredCachedInfos);
+                foreach (KeyValuePair<GUID, SceneDependencyInfo> sceneData in dependencyData.SceneInfo)
+                    GetCachedAssetState(guidToCatalogLocation, guidToEntries, sceneData.Key, sceneData.Value.referencedObjects, gatheredCachedInfos);
+            }
 
             return gatheredCachedInfos;
         }
@@ -840,19 +844,21 @@ namespace UnityEditor.AddressableAssets.Build
                 if (g == null)
                     return false;
 
-                if (!g.HasSchema<BundledAssetGroupSchema>())
+                var bundledAssetGroupSchema = g.GetSchema<BundledAssetGroupSchema>();
+                if (bundledAssetGroupSchema == null || !bundledAssetGroupSchema.IsEnabled || !g.IncludeInBuild)
                 {
                     noBundledAssetGroupSchema.Add(g.Name);
                     return false;
                 }
 
-                if (!g.HasSchema<ContentUpdateGroupSchema>())
+                var contentUpdateSchema = g.GetSchema<ContentUpdateGroupSchema>();
+                if (!g.HasSchema<ContentUpdateGroupSchema>() || contentUpdateSchema == null || !contentUpdateSchema.IsEnabled)
                 {
                     noStaticContent.Add(g.Name);
                     return false;
                 }
 
-                if (!g.GetSchema<ContentUpdateGroupSchema>().StaticContent)
+                if (!contentUpdateSchema.StaticContent)
                 {
                     noStaticContent.Add(g.Name);
                     return false;
@@ -925,9 +931,7 @@ namespace UnityEditor.AddressableAssets.Build
                     e.FlaggedDuringContentUpdateRestriction = false;
                 if (e.IsFolder)
                 {
-                    List<AddressableAssetEntry> folderEntries = new List<AddressableAssetEntry>();
-                    e.GatherFolderEntries(folderEntries, true, true, null);
-                    ClearContentUpdateFlagForEntries(folderEntries);
+                    ClearContentUpdateFlagForEntries(e.SubAssets);
                 }
             }
         }
@@ -1005,10 +1009,10 @@ namespace UnityEditor.AddressableAssets.Build
             foreach (AddressableAssetGroup group in settings.groups)
             {
                 var staticSchema = group.GetSchema<ContentUpdateGroupSchema>();
-                if (staticSchema == null)
+                if (staticSchema == null || !staticSchema.IsEnabled)
                     continue;
                 var bundleSchema = group.GetSchema<BundledAssetGroupSchema>();
-                if (bundleSchema == null)
+                if (bundleSchema == null || !bundleSchema.IsEnabled || !group.IncludeInBuild)
                     continue;
 
                 if (staticSchema.StaticContent)
@@ -1056,10 +1060,12 @@ namespace UnityEditor.AddressableAssets.Build
                     continue;
 
                 var schema = group.GetSchema<BundledAssetGroupSchema>();
+                if (schema == null || !schema.IsEnabled || !group.IncludeInBuild)
+                    continue;
                 List<AssetBundleBuild> bundleInputDefinitions = new List<AssetBundleBuild>();
 
                 BuildScriptPackedMode.PrepGroupBundlePacking(group, bundleInputDefinitions, schema, entry => !entryGuidToDeps.ContainsKey(entry.guid));
-                BuildScriptPackedMode.HandleBundleNames(bundleInputDefinitions);
+                BundledAssetSchemaBuilder.HandleBundleNames(bundleInputDefinitions);
 
                 for (int i = 0; i < bundleInputDefinitions.Count; i++)
                 {
@@ -1100,8 +1106,9 @@ namespace UnityEditor.AddressableAssets.Build
 
                     if (!groupHasStaticContentMap.TryGetValue(depEntry.parentGroup, out bool groupHasStaticContentEnabled))
                     {
+                        var depGroupSchema = depEntry.parentGroup.GetSchema<ContentUpdateGroupSchema>();
                         groupHasStaticContentEnabled = depEntry.parentGroup.HasSchema<ContentUpdateGroupSchema>() &&
-                            depEntry.parentGroup.GetSchema<ContentUpdateGroupSchema>().StaticContent;
+                            depGroupSchema != null && depGroupSchema.IsEnabled && depGroupSchema.StaticContent;
 
                         groupHasStaticContentMap.Add(depEntry.parentGroup, groupHasStaticContentEnabled);
                     }
@@ -1125,7 +1132,10 @@ namespace UnityEditor.AddressableAssets.Build
             {
                 if (entry.IsScene && !entriesToAdd.Contains(entry))
                 {
-                    switch (entry.parentGroup.GetSchema<BundledAssetGroupSchema>().BundleMode)
+                    var entryBundleSchema = entry.parentGroup.GetSchema<BundledAssetGroupSchema>();
+                    if (entryBundleSchema == null || !entryBundleSchema.IsEnabled)
+                        continue;
+                    switch (entryBundleSchema.BundleMode)
                     {
                         case BundledAssetGroupSchema.BundlePackingMode.PackTogether:
                             //Add every scene in the group to modified entries
@@ -1219,9 +1229,11 @@ namespace UnityEditor.AddressableAssets.Build
         {
             if (g == null)
                 return false;
-            if (!g.HasSchema<ContentUpdateGroupSchema>() || !g.GetSchema<ContentUpdateGroupSchema>().StaticContent)
+            var contentUpdateSchema = g.GetSchema<ContentUpdateGroupSchema>();
+            if (!g.HasSchema<ContentUpdateGroupSchema>() || contentUpdateSchema == null || !contentUpdateSchema.IsEnabled || !contentUpdateSchema.StaticContent)
                 return false;
-            if (!g.HasSchema<BundledAssetGroupSchema>() || !g.GetSchema<BundledAssetGroupSchema>().IncludeInBuild)
+            var bundleSchema = g.GetSchema<BundledAssetGroupSchema>();
+            if (!g.HasSchema<BundledAssetGroupSchema>() || bundleSchema == null || !bundleSchema.IsEnabled || !g.IncludeInBuild)
                 return false;
             return true;
         }

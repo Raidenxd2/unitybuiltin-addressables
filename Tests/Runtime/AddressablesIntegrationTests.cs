@@ -6,6 +6,7 @@ using UnityEngine.TestTools;
 using NUnit.Framework;
 using System.Collections;
 using System;
+using System.IO;
 using System.Linq;
 using UnityEngine.AddressableAssets.ResourceLocators;
 using UnityEngine.ResourceManagement.ResourceLocations;
@@ -14,6 +15,7 @@ using UnityEngine.ResourceManagement.ResourceProviders;
 using UnityEngine.ResourceManagement.AsyncOperations;
 
 #if UNITY_EDITOR
+using UnityEditor;
 using UnityEditor.TestTools;
 #endif
 
@@ -26,12 +28,9 @@ namespace AddressableAssetsIntegrationTests
         List<object> m_PrefabKeysList = new List<object>();
 
         Action<AsyncOperationHandle, Exception> m_PrevHandler;
-        protected const string kCatalogExt =
-#if !ENABLE_JSON_CATALOG
-            ".bin";
-#else
-            ".json";
-#endif
+        protected virtual bool UseJsonCatalog => false;
+        protected string BuildSuffix => UseJsonCatalog ? "BASEJSON" : "BASE";
+        protected string kCatalogExt => UseJsonCatalog ? ".json" : ".bin";
         protected const string k_TestConfigName = "AddressableAssetSettings.Tests";
         protected const string k_TestConfigFolder = "Assets/AddressableAssetsData_AddressableAssetSettingsIntegrationTests";
 
@@ -62,14 +61,33 @@ namespace AddressableAssetsIntegrationTests
 
         public virtual void Setup()
         {
-            AddressablesTestUtility.Setup(TypeName, PathFormat, "BASE", false);
+            AddressablesTestUtility.Setup(TypeName, PathFormat, BuildSuffix, false, UseJsonCatalog);
         }
 
         [OneTimeTearDown]
         public virtual void DeleteTempFiles()
         {
+            m_Addressables?.Dispose();
+            m_Addressables = null;
+
             ResourceManager.ExceptionHandler = m_PrevHandler;
-            AddressablesTestUtility.TearDown(TypeName, PathFormat, "BASE");
+            AddressablesTestUtility.TearDown(TypeName, PathFormat, BuildSuffix);
+        }
+
+        // Deletes the persistent catalog cache folder so a catalog cached by a prior
+        // test or session cannot be served instead of the catalog under test.
+        // The cache lives at {Application.persistentDataPath}/com.unity.addressables/.
+        static void ClearCatalogCache()
+        {
+            string cacheFolder = AddressablesImpl.ResolveInternalId(AddressablesImpl.kCacheDataFolder);
+            if (Directory.Exists(cacheFolder))
+                Directory.Delete(cacheFolder, true);
+        }
+
+        [SetUp]
+        public void ClearCatalogCacheBeforeTest()
+        {
+            ClearCatalogCache();
         }
 
         int m_StartingOpCount;
@@ -104,6 +122,8 @@ namespace AddressableAssetsIntegrationTests
 
             PostTearDownEvent?.Invoke();
             PostTearDownEvent = null;
+
+            ClearCatalogCache();
         }
 
         //we must wait for Addressables initialization to complete since we are clearing out all of its data for the tests.
@@ -114,10 +134,10 @@ namespace AddressableAssetsIntegrationTests
         {
             get
             {
-                var runtimeSettingsPath = AddressablesImpl.RuntimePath + "/settingsBASE.json";
+                var runtimeSettingsPath = AddressablesImpl.RuntimePath + $"/settings{BuildSuffix}.json";
 #if UNITY_EDITOR
 
-                runtimeSettingsPath = GetRuntimePath(currentInitType, "BASE");
+                runtimeSettingsPath = GetRuntimePath(currentInitType, BuildSuffix);
 #endif
                 runtimeSettingsPath = AddressablesImpl.ResolveInternalId(runtimeSettingsPath);
                 return runtimeSettingsPath;
@@ -203,6 +223,7 @@ namespace AddressableAssetsIntegrationTests
 
         private void ResetAddressables()
         {
+            m_Addressables?.Dispose();
             m_Addressables = null;
             currentInitType = null;
             initializationComplete = false;
@@ -235,8 +256,18 @@ namespace AddressableAssetsIntegrationTests
 
         protected override string GetRuntimePath(string testType, string suffix)
         {
-            return PlayerPrefs.GetString(Addressables.kAddressablesRuntimeDataPath + TypeName, "");
+#if UNITY_EDITOR
+            return SessionState.GetString(Addressables.kAddressablesRuntimeDataPath + TypeName + "_" + BuildSuffix, "");
+#else
+            Assert.Fail("FastMode is editor only");
+            return null;
+#endif
         }
+    }
+
+    class AddressablesIntegrationTestsFastModeJson : AddressablesIntegrationTestsFastMode
+    {
+        protected override bool UseJsonCatalog => true;
     }
 
     abstract class AddressablesIntegrationTestsPackedPlayMode : AddressablesIntegrationTests
@@ -253,14 +284,14 @@ namespace AddressableAssetsIntegrationTests
 
         public override void Setup()
         {
-            AddressablesTestUtility.Setup("BuildScriptPackedMode", PathFormat, "BASE", UseUnityWebRequestForLocalBundles);
-            AddressablesTestUtility.Setup(TypeName, PathFormat, "BASE", UseUnityWebRequestForLocalBundles);
+            AddressablesTestUtility.Setup(PackedBundleDataBuilderTypeName, PathFormat, BuildSuffix, UseUnityWebRequestForLocalBundles, UseJsonCatalog);
+            AddressablesTestUtility.Setup(TypeName, PathFormat, BuildSuffix, UseUnityWebRequestForLocalBundles, UseJsonCatalog);
         }
 
         public override void DeleteTempFiles()
         {
-            AddressablesTestUtility.TearDown("BuildScriptPackedMode", PathFormat, "BASE");
-            AddressablesTestUtility.TearDown(TypeName, PathFormat, "BASE");
+            AddressablesTestUtility.TearDown(PackedBundleDataBuilderTypeName, PathFormat, BuildSuffix);
+            AddressablesTestUtility.TearDown(TypeName, PathFormat, BuildSuffix);
         }
 
         [UnityTest]
@@ -283,31 +314,48 @@ namespace AddressableAssetsIntegrationTests
             return GetDownloadSize_WithList_CalculatesCorrectSize_WhenAssetsReferenceSameBundleInternal();
         }
     }
-#endif
 
-#if UNITY_EDITOR
+    abstract class AddressablesIntegrationTestsAllHooksPackedPlayMode : AddressablesIntegrationTestsPackedPlayMode
+    {
+        protected override string PackedBundleDataBuilderTypeName =>
+            typeof(UnityEditor.AddressableAssets.Tests.AllHooksLoggingPackedMode).Name;
+    }
+
     [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
-#endif
+    class AddressablesIntegrationTestsAllHooksPackedPlayModeWindowsUseUwr : AddressablesIntegrationTestsAllHooksPackedPlayMode
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
+    class AddressablesIntegrationTestsAllHooksPackedPlayModeOSXUseUwr : AddressablesIntegrationTestsAllHooksPackedPlayMode
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
+    class AddressablesIntegrationTestsAllHooksPackedPlayModeLinuxUseUwr : AddressablesIntegrationTestsAllHooksPackedPlayMode
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
     class AddressablesIntegrationTestsPlayerWindowsUseUwr : AddressablesIntegrationPlayer
     {
         // using UWR should just download and not load the asset bundles
 
         protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
     }
-#if UNITY_EDITOR
-    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
-#endif
 
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
     class AddressablesIntegrationTestsPlayerOSXUseUwr : AddressablesIntegrationPlayer
     {
         // using UWR should just download and not load the asset bundles
 
         protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
     }
-#if UNITY_EDITOR
-    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
-#endif
 
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
     class AddressablesIntegrationTestsPlayerLinuxUseUwr : AddressablesIntegrationPlayer
     {
         // using UWR should just download and not load the asset bundles
@@ -315,7 +363,26 @@ namespace AddressableAssetsIntegrationTests
         protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
     }
 
-#if UNITY_EDITOR
+    // Player JSON twins
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
+    class AddressablesIntegrationTestsPlayerWindowsUseUwrJson : AddressablesIntegrationPlayer
+    {
+        protected override bool UseJsonCatalog => true;
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
+    class AddressablesIntegrationTestsPlayerOSXUseUwrJson : AddressablesIntegrationPlayer
+    {
+        protected override bool UseJsonCatalog => true;
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
+    class AddressablesIntegrationTestsPlayerLinuxUseUwrJson : AddressablesIntegrationPlayer
+    {
+        protected override bool UseJsonCatalog => true;
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
     [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
     class AddressablesIntegrationTestsPackedPlayModeWindowsUseUwr : AddressablesIntegrationTestsPackedPlayMode
     {
@@ -333,6 +400,29 @@ namespace AddressableAssetsIntegrationTests
     {
         protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
     }
+
+    abstract class AddressablesIntegrationTestsPackedPlayModeJson : AddressablesIntegrationTestsPackedPlayMode
+    {
+        protected override bool UseJsonCatalog => true;
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
+    class AddressablesIntegrationTestsPackedPlayModeWindowsUseUwrJson : AddressablesIntegrationTestsPackedPlayModeJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
+    class AddressablesIntegrationTestsPackedPlayModeOSXUseUwrJson : AddressablesIntegrationTestsPackedPlayModeJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
+    class AddressablesIntegrationTestsPackedPlayModeLinuxUseUwrJson : AddressablesIntegrationTestsPackedPlayModeJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
 #endif
 
     abstract class AddressablesIntegrationPlayer : AddressablesIntegrationTests
@@ -344,14 +434,14 @@ namespace AddressableAssetsIntegrationTests
 
         public override void Setup()
         {
-            AddressablesTestUtility.Setup("BuildScriptPackedMode", PathFormat, "BASE", UseUnityWebRequestForLocalBundles);
-            AddressablesTestUtility.Setup(TypeName, PathFormat, "BASE", UseUnityWebRequestForLocalBundles);
+            AddressablesTestUtility.Setup(PackedBundleDataBuilderTypeName, PathFormat, BuildSuffix, UseUnityWebRequestForLocalBundles, UseJsonCatalog);
+            AddressablesTestUtility.Setup(TypeName, PathFormat, BuildSuffix, UseUnityWebRequestForLocalBundles, UseJsonCatalog);
         }
 
         public override void DeleteTempFiles()
         {
-            AddressablesTestUtility.TearDown("BuildScriptPackedMode", PathFormat, "BASE");
-            AddressablesTestUtility.TearDown(TypeName, PathFormat, "BASE");
+            AddressablesTestUtility.TearDown(PackedBundleDataBuilderTypeName, PathFormat, BuildSuffix);
+            AddressablesTestUtility.TearDown(TypeName, PathFormat, BuildSuffix);
         }
 
         protected override string GetRuntimePath(string testType, string suffix)
@@ -390,5 +480,79 @@ namespace AddressableAssetsIntegrationTests
             return GetDownloadSize_WithList_CalculatesCorrectSize_WhenAssetsReferenceSameBundleInternal();
         }
     }
+
+#if UNITY_EDITOR
+    abstract class AddressablesIntegrationTestsAllHooksPlayer : AddressablesIntegrationPlayer
+    {
+        protected override string PackedBundleDataBuilderTypeName =>
+            typeof(UnityEditor.AddressableAssets.Tests.AllHooksLoggingPackedMode).Name;
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
+    class AddressablesIntegrationTestsAllHooksPlayerWindowsUseUwr : AddressablesIntegrationTestsAllHooksPlayer
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
+    class AddressablesIntegrationTestsAllHooksPlayerOSXUseUwr : AddressablesIntegrationTestsAllHooksPlayer
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
+    class AddressablesIntegrationTestsAllHooksPlayerLinuxUseUwr : AddressablesIntegrationTestsAllHooksPlayer
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    // --- JSON catalog twins ---
+
+    abstract class AddressablesIntegrationTestsAllHooksPackedPlayModeJson : AddressablesIntegrationTestsAllHooksPackedPlayMode
+    {
+        protected override bool UseJsonCatalog => true;
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
+    class AddressablesIntegrationTestsAllHooksPackedPlayModeWindowsUseUwrJson : AddressablesIntegrationTestsAllHooksPackedPlayModeJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
+    class AddressablesIntegrationTestsAllHooksPackedPlayModeOSXUseUwrJson : AddressablesIntegrationTestsAllHooksPackedPlayModeJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
+    class AddressablesIntegrationTestsAllHooksPackedPlayModeLinuxUseUwrJson : AddressablesIntegrationTestsAllHooksPackedPlayModeJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    abstract class AddressablesIntegrationTestsAllHooksPlayerJson : AddressablesIntegrationTestsAllHooksPlayer
+    {
+        protected override bool UseJsonCatalog => true;
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneWindows64)]
+    class AddressablesIntegrationTestsAllHooksPlayerWindowsUseUwrJson : AddressablesIntegrationTestsAllHooksPlayerJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneOSX)]
+    class AddressablesIntegrationTestsAllHooksPlayerOSXUseUwrJson : AddressablesIntegrationTestsAllHooksPlayerJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+
+    [RequirePlatformSupport(UnityEditor.BuildTarget.StandaloneLinux64)]
+    class AddressablesIntegrationTestsAllHooksPlayerLinuxUseUwrJson : AddressablesIntegrationTestsAllHooksPlayerJson
+    {
+        protected override bool UseUnityWebRequestForLocalBundles { get { return true; } }
+    }
+#endif
 }
 

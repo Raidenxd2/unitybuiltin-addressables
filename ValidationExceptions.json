@@ -2,13 +2,12 @@
   "ErrorExceptions": [
     {
       "ValidationTest": "API Validation",
-      "ExceptionMessage": "Additions require a new minor or major version.",
-      "PackageVersion": "2.11.1"
+      "PackageVersion": "4.1.0"
     },
     {
       "ValidationTest": "Restricted File Type Validation",
       "ExceptionMessage": "/Editor/Tools~/win/AddressablesFormatConverter.exe cannot be included in a package.",
-      "PackageVersion": "2.11.1"
+      "PackageVersion": "4.1.0"
     }
   ]
 }

@@ -49,17 +49,17 @@ public class RevertUnchangedAssetsToPreviousAssetState
 
         foreach (var assetGroup in groups)
         {
-            List<AssetEntryRevertOperation> operations = DetermineRequiredAssetEntryUpdates(assetGroup, updateContext);
+            List<AssetEntryRevertOperation> operations = DetermineRequiredAssetEntryUpdates(assetGroup, updateContext, aaContext.FolderEnumerator);
             if (operations != null && operations.Count > 0)
                 ApplyAssetEntryUpdates(operations, updateContext);
         }
 
         var defaultContentUpdateSchema = aaContext.Settings.DefaultGroup.GetSchema<ContentUpdateGroupSchema>();
-        if (defaultContentUpdateSchema == null)
+        if (defaultContentUpdateSchema == null || !defaultContentUpdateSchema.IsEnabled)
         {
-            Debug.LogWarning($"Default group {aaContext.Settings.DefaultGroup.Name} does not contain a {nameof(ContentUpdateGroupSchema)}, so we're unable to determine if " +
+            Debug.LogWarning($"Default group {aaContext.Settings.DefaultGroup.Name} does not contain an enabled {nameof(ContentUpdateGroupSchema)}, so we're unable to determine if " +
                              $"the built in shader bundle and monoscript bundles need to be reverting to their previous paths.  We will not revert the paths for these bundles in the catalog, " +
-                             $"if that is not the desired behavior, please add a {nameof(ContentUpdateGroupSchema)} to the Default group and set the Prevent Updates toggle to the correct setting.");
+                             $"if that is not the desired behavior, please add a {nameof(ContentUpdateGroupSchema)} to the Default group, enable it, and set the Prevent Updates toggle to the correct setting.");
         }
         else if (defaultContentUpdateSchema.StaticContent)
         {
@@ -147,16 +147,19 @@ public class RevertUnchangedAssetsToPreviousAssetState
         return true;
     }
 
-    internal static List<AssetEntryRevertOperation> DetermineRequiredAssetEntryUpdates(AddressableAssetGroup group, ContentUpdateScript.ContentUpdateContext contentUpdateContext)
+    internal static List<AssetEntryRevertOperation> DetermineRequiredAssetEntryUpdates(AddressableAssetGroup group, ContentUpdateScript.ContentUpdateContext contentUpdateContext,
+        AddressableFolderEnumerator enumerator = null)
     {
-        if (!group.HasSchema<BundledAssetGroupSchema>())
+        var bundleSchema = group.GetSchema<BundledAssetGroupSchema>();
+        if (!group.HasSchema<BundledAssetGroupSchema>() || bundleSchema == null || !bundleSchema.IsEnabled)
             return new List<AssetEntryRevertOperation>();
 
-        bool groupIsStaticContentGroup = group.HasSchema<ContentUpdateGroupSchema>() && group.GetSchema<ContentUpdateGroupSchema>().StaticContent;
+        var contentUpdateSchema = group.GetSchema<ContentUpdateGroupSchema>();
+        bool groupIsStaticContentGroup = group.HasSchema<ContentUpdateGroupSchema>() && contentUpdateSchema != null && contentUpdateSchema.IsEnabled && contentUpdateSchema.StaticContent;
         List<AssetEntryRevertOperation> operations = new List<AssetEntryRevertOperation>();
 
         List<AddressableAssetEntry> allEntries = new List<AddressableAssetEntry>();
-        group.GatherAllAssets(allEntries, true, true, false);
+        group.GatherAllAssets(allEntries, true, true, false, null, enumerator);
         foreach (AddressableAssetEntry entry in allEntries)
         {
             if (entry.IsFolder)
@@ -194,6 +197,8 @@ public class RevertUnchangedAssetsToPreviousAssetState
                 continue;
 
             var schema = group.GetSchema<BundledAssetGroupSchema>();
+            if (schema == null || !schema.IsEnabled)
+                continue;
             string loadPath = schema.LoadPath.GetValue(group.Settings);
             string buildPath = schema.BuildPath.GetValue(group.Settings);
 

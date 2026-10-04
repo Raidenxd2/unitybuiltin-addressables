@@ -23,6 +23,12 @@ namespace AddressableAssetsIntegrationTests
 
         protected virtual bool UseUnityWebRequestForLocalBundles { get { return false; } }
 
+        /// <summary>
+        /// Short type name passed to <see cref="AddressablesTestUtility.Setup"/> for the packed bundle prebuild phase
+        /// (default stock <c>BuildScriptPackedMode</c>; integration mirrors use <see cref="AllHooksLoggingPackedMode"/>).
+        /// </summary>
+        protected virtual string PackedBundleDataBuilderTypeName => "BuildScriptPackedMode";
+
         [SetUp]
         public void SetUp()
         {
@@ -69,6 +75,26 @@ namespace AddressableAssetsIntegrationTests
                 }
             }
             Assert.AreEqual(ExpectedAssetBundlesLoadedCount, opLoadedBundleCount);
+        }
+
+        // A provider's own bundle resource type. The download gate must accept it.
+        interface ITestBundleSubtype : IAssetBundleResource
+        {
+        }
+
+        static IResourceLocation DownloadGateLocation(Type resourceType)
+        {
+            return new ResourceLocationBase("downloadGate", "downloadGate.bundle", typeof(AssetBundleProvider).FullName, resourceType);
+        }
+
+        [Test]
+        public void IsDownloadableLocation_AcceptsAssetBundleResourceAndItsSubtypes()
+        {
+            Assert.IsTrue(AddressablesImpl.IsDownloadableLocation(DownloadGateLocation(typeof(IAssetBundleResource))));
+            Assert.IsTrue(AddressablesImpl.IsDownloadableLocation(DownloadGateLocation(typeof(ITestBundleSubtype))),
+                "A provider's own IAssetBundleResource subtype must still download");
+            Assert.IsFalse(AddressablesImpl.IsDownloadableLocation(DownloadGateLocation(typeof(object))));
+            Assert.IsFalse(AddressablesImpl.IsDownloadableLocation(DownloadGateLocation(typeof(GameObject))));
         }
 
         [UnityTest]
@@ -309,7 +335,7 @@ namespace AddressableAssetsIntegrationTests
 #if ENABLE_CACHING
             Caching.ClearCache();
 #endif
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label);
             yield return op;
 
@@ -409,7 +435,7 @@ namespace AddressableAssetsIntegrationTests
 
             yield return Init();
 
-            string label = AddressablesTestUtility.GetPrefabLabel("BASE");
+            string label = AddressablesTestUtility.GetPrefabLabel(BuildSuffix);
             m_Addressables.hasStartedInitialization = false;
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(label, false);
             m_Addressables.hasStartedInitialization = true;
@@ -435,7 +461,7 @@ namespace AddressableAssetsIntegrationTests
             }
 
             IList<IResourceLocation> locations;
-            var ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out locations);
+            var ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out locations);
 
             Assert.IsTrue(ret);
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(locations);
@@ -453,7 +479,7 @@ namespace AddressableAssetsIntegrationTests
         {
             yield return Init();
             IList<IResourceLocation> locations;
-            m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out locations);
+            m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out locations);
 
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(locations, true);
             yield return op;
@@ -473,7 +499,7 @@ namespace AddressableAssetsIntegrationTests
             }
 
             IList<IResourceLocation> locations;
-            var ret = m_Addressables.GetResourceLocations(new object[] {"prefabs_evenBASE"}, typeof(GameObject), Addressables.MergeMode.Intersection, out locations);
+            var ret = m_Addressables.GetResourceLocations(new object[] {$"prefabs_even{BuildSuffix}"}, typeof(GameObject), Addressables.MergeMode.Intersection, out locations);
 
             Assert.IsTrue(ret);
             m_Addressables.hasStartedInitialization = false;
@@ -501,7 +527,7 @@ namespace AddressableAssetsIntegrationTests
             }
 
             List<object> deps = new List<object>();
-            deps.Add(AddressablesTestUtility.GetPrefabLabel("BASE"));
+            deps.Add(AddressablesTestUtility.GetPrefabLabel(BuildSuffix));
 
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(deps, Addressables.MergeMode.Intersection, false);
             yield return op;
@@ -524,7 +550,7 @@ namespace AddressableAssetsIntegrationTests
             }
 
             List<object> deps = new List<object>();
-            deps.Add(AddressablesTestUtility.GetPrefabLabel("BASE"));
+            deps.Add(AddressablesTestUtility.GetPrefabLabel(BuildSuffix));
 
             m_Addressables.hasStartedInitialization = false;
             AsyncOperationHandle op = m_Addressables.DownloadDependenciesAsync(deps, Addressables.MergeMode.Intersection, false);

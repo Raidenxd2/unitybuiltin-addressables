@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Linq;
+using UnityEditor.AddressableAssets.GUI;
 using UnityEngine;
 using UnityEngine.ResourceManagement.ResourceProviders;
 using UnityEngine.ResourceManagement.Util;
@@ -13,8 +13,13 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
     /// Schema used for bundled asset groups.
     /// </summary>
 //    [CreateAssetMenu(fileName = "BundledAssetGroupSchema.asset", menuName = "Addressables/Group Schemas/Bundled Assets")]
-    [DisplayName("Content Packing & Loading")]
-    public class BundledAssetGroupSchema : AddressableAssetGroupSchema, ISerializationCallbackReceiver
+    [DisplayName("Content Packing & Loading (AssetBundle)")]
+    [AddressablesHelpURL("group-inspector-settings-reference.html")]
+    public class BundledAssetGroupSchema : AddressableAssetGroupSchema,
+        ISerializationCallbackReceiver,
+        IBuildableSchema,
+        ICanIncludeFolderKeys,
+        ICanIncludeLabels
     {
         /// <summary>
         /// Defines how bundles are created.
@@ -81,6 +86,8 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
 
         [SerializeField]
         BundleInternalIdMode m_InternalBundleIdMode = BundleInternalIdMode.GroupGuidProjectIdHash;
+
+        const int k_HelpBoxUIPadding = 4;
 
         /// <summary>
         /// Internal bundle naming mode
@@ -157,6 +164,12 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         [SerializeField]
         bool m_IncludeLabelsInCatalog = true;
 
+        [SerializeField]
+        bool m_IncludeFolderKeysInCatalog = true;
+
+        [SerializeField]
+        bool m_IncludeAddressesForFolderChildren = true;
+
         /// <summary>
         /// If enabled, addresses are included in the content catalog.  This is required if assets are to be loaded via their main address.
         /// </summary>
@@ -200,6 +213,47 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 if (m_IncludeLabelsInCatalog != value)
                 {
                     m_IncludeLabelsInCatalog = value;
+                    SetDirty(true);
+                }
+            }
+        }
+
+        /// <summary>
+        /// If enabled, each addressable folder's own address is included as an extra shared key on
+        /// every asset within that folder.  This allows loading every asset in an addressable folder
+        /// with a single call, for example Addressables.LoadAssetsAsync(folderAddress, ...), similar to
+        /// Resources.LoadAll.  This is useful for reducing the size of the catalog if whole-folder
+        /// loading is not needed.
+        /// </summary>
+        public bool IncludeFolderKeysInCatalog
+        {
+            get => m_IncludeFolderKeysInCatalog;
+            set
+            {
+                if (m_IncludeFolderKeysInCatalog != value)
+                {
+                    m_IncludeFolderKeysInCatalog = value;
+                    SetDirty(true);
+                }
+            }
+        }
+
+        /// <summary>
+        /// If disabled, assets inside an addressable folder do not get their own individual address
+        /// added to the catalog -- only the folder's shared key (see IncludeFolderKeysInCatalog) is
+        /// added. GUIDs are unaffected, so AssetReferences into folder assets keep working; the GUID
+        /// becomes that asset's primary key instead of its address. Disable this if you always load
+        /// these assets via the folder and never reference an individual asset by its own full address,
+        /// to reduce the size of the catalog. Only takes effect when IncludeFolderKeysInCatalog is enabled.
+        /// </summary>
+        public bool IncludeAddressesForFolderChildren
+        {
+            get => m_IncludeAddressesForFolderChildren;
+            set
+            {
+                if (m_IncludeAddressesForFolderChildren != value)
+                {
+                    m_IncludeAddressesForFolderChildren = value;
                     SetDirty(true);
                 }
             }
@@ -274,32 +328,39 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             //Unfortunately the BuildCompression struct is not serializable (nor is it settable), therefore this enum needs to be used to return the static members....
             switch (m_Compression)
             {
-                case BundleCompressionMode.Uncompressed: return BuildCompression.Uncompressed;
-                case BundleCompressionMode.LZ4: return BuildCompression.LZ4;
-                case BundleCompressionMode.LZMA: return BuildCompression.LZMA;
+                case BundleCompressionMode.Uncompressed:
+                    return BuildCompression.Uncompressed;
+                case BundleCompressionMode.LZ4:
+                    return BuildCompression.LZ4;
+                case BundleCompressionMode.LZMA:
+                    return BuildCompression.LZMA;
             }
 
             return default(BuildCompression);
         }
 
+        // Retained (serialized) only so a project's previously-stored per-schema value can be migrated up to the
+        // group on load. The IncludeInBuild property below no longer reads this field; it forwards to the group.
         [FormerlySerializedAs("m_includeInBuild")]
         [SerializeField]
-        [Tooltip("If true, the assets in this group will be included in the build of bundles.")]
         bool m_IncludeInBuild = true;
+
+        internal override bool? GetDeprecatedIncludeInBuild() => m_IncludeInBuild;
 
         /// <summary>
         /// If true, the assets in this group will be included in the build of bundles.
         /// </summary>
+        /// <remarks>
+        /// Include in Build is stored on the owning <see cref="AddressableAssetGroup"/>. This property forwards to
+        /// <see cref="AddressableAssetGroup.IncludeInBuild"/> so the group remains the single source of truth.
+        /// </remarks>
         public bool IncludeInBuild
         {
-            get => m_IncludeInBuild;
+            get => Group == null || Group.IncludeInBuild;
             set
             {
-                if (m_IncludeInBuild != value)
-                {
-                    m_IncludeInBuild = value;
-                    SetDirty(true);
-                }
+                if (Group != null)
+                    Group.IncludeInBuild = value;
             }
         }
 
@@ -390,9 +451,54 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             }
         }
 
+        /// <summary>
+        /// Determines whether a given schema will be included in a Schema Driven build. This is particularly useful
+        /// if you want to alternate between building AssetBundles and ContentDirectories.
+        /// Only one buildable schema can be enabled on a group at a time. If you attempt to enable multiple at once, an error will be thrown.
+        /// </summary>
+        public override bool IsEnabled
+        {
+            get => m_SchemaIsEnabled;
+            set
+            {
+                if (m_SchemaIsEnabled != value)
+                {
+                    if (value)
+                    {
+                        string warningString = CanEnableSchema();
+                        if (!String.IsNullOrEmpty(warningString))
+                            Debug.LogError(warningString);
+                        // Allow the set even when another buildable schema is enabled so the user can enable both;
+                        // the group inspector shows an error and logs when both are enabled.
+                    }
+
+                    m_SchemaIsEnabled = value;
+                    SetDirty(true);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Determines whether the BundledAssetGroupSchema can be enabled or not.
+        /// A BundledAssetGroupSchema can be enabled if there are no other buildable schemas (such as a Content Directory Schema) enabled.
+        /// Used e.g. when adding a schema via Add Schema so the new schema is defaulted to disabled when the other is already enabled.
+        /// The user can still manually enable both in the inspector; the group inspector then shows an error.
+        /// </summary>
+        /// <returns>Returns an empty string if enabling is valid, or an error/warning string if another buildable schema is already enabled.</returns>
+        public override string CanEnableSchema()
+        {
+            foreach (var schema in Group.Schemas)
+            {
+                if (schema != this && schema is ContentDirectoryGroupSchema cdgs && cdgs.IsEnabled)
+                    return AddressablesGUIUtility.CanEnableSchemaError(Group.Name, this.GetType(), schema.GetType());
+            }
+            return "";
+        }
+
+
         [SerializeField]
         [Tooltip("If true, the CRC (Cyclic Redundancy Check) of the asset bundle is used to check the integrity.  This can be used for both local and remote bundles.")]
-        bool m_UseAssetBundleCrc = true;
+        internal bool m_UseAssetBundleCrc = true;
 
         /// <summary>
         /// If true, the CRC and Hash values of the asset bundle are used to determine if a bundle can be loaded from the local cache instead of downloaded.
@@ -412,12 +518,15 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                     m_UseAssetBundleCrc = value;
                     SetDirty(true);
                 }
+
+                if (!value)
+                    UseAssetBundleCrcForCachedBundles = false;
             }
         }
 
         [SerializeField]
         [Tooltip("If true, the CRC (Cyclic Redundancy Check) of the asset bundle is used to check the integrity.")]
-        bool m_UseAssetBundleCrcForCachedBundles = true;
+        internal bool m_UseAssetBundleCrcForCachedBundles = true;
 
         /// <summary>
         /// If true, the CRC and Hash values of the asset bundle are used to determine if a bundle can be loaded from the local cache instead of downloaded.
@@ -432,9 +541,40 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             }
             set
             {
+                // UUM-140558: cached-bundle CRC is a sub-behavior of CRC, so enabling it
+                // enables CRC too. This keeps the pair order-independent for scripted
+                // callers and unreachable in the stale (CRC off, cached on) state.
+                if (value && !m_UseAssetBundleCrc)
+                    UseAssetBundleCrc = true;
+
                 if (m_UseAssetBundleCrcForCachedBundles != value)
                 {
                     m_UseAssetBundleCrcForCachedBundles = value;
+                    SetDirty(true);
+                }
+            }
+        }
+
+        [SerializeField]
+        [Tooltip("How the local cache is asked whether a bundle version is already downloaded.")]
+        internal CacheProbeMode m_CacheProbeMode = CacheProbeMode.CachedVersions;
+
+        /// <summary>
+        /// How the local cache is asked whether a bundle version is already downloaded.
+        /// </summary>
+        public CacheProbeMode CacheProbeMode
+        {
+            get
+            {
+                if (UseDefaultSchemaSettings)
+                    return GetDefaultSchemaSettings().cacheProbeMode;
+                return m_CacheProbeMode;
+            }
+            set
+            {
+                if (m_CacheProbeMode != value)
+                {
+                    m_CacheProbeMode = value;
                     SetDirty(true);
                 }
             }
@@ -538,7 +678,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         [FormerlySerializedAs("m_retryCount")]
         [SerializeField]
         [Tooltip("Indicates the number of times the request will be retried.")]
-        [Range(0,128)]
+        [Range(0, 128)]
         int m_RetryCount = 0;
 
         /// <summary>
@@ -564,7 +704,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         [FormerlySerializedAs("m_buildPath")]
         [SerializeField]
         [Tooltip("The path to copy asset bundles to.")]
-        ProfileValueReference m_BuildPath = new ProfileValueReference();
+        internal ProfileValueReference m_BuildPath = new ProfileValueReference();
 
         /// <summary>
         /// The path to copy asset bundles to.
@@ -577,7 +717,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         [FormerlySerializedAs("m_loadPath")]
         [SerializeField]
         [Tooltip("The path to load bundles from.")]
-        ProfileValueReference m_LoadPath = new ProfileValueReference();
+        internal ProfileValueReference m_LoadPath = new ProfileValueReference();
 
         /// <summary>
         /// The path to load bundles from.
@@ -692,7 +832,6 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
 
         private GUIContent m_BuildAndLoadPathsGUIContent = new GUIContent("Build & Load Paths", "Paths to build or load AssetBundles from");
         private GUIContent m_PathsPreviewGUIContent = new GUIContent("Path Preview", "Preview of what the current paths will be evaluated to");
-
         /// <summary>
         /// Set default values taken from the assigned group.
         /// </summary>
@@ -700,30 +839,6 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         protected override void OnSetGroup(AddressableAssetGroup group)
         {
             //this can happen during the load of the addressables asset
-        }
-
-        internal void SetPathVariable(AddressableAssetSettings addressableAssetSettings, ref ProfileValueReference path, string newPathName, string oldPathName, List<string> variableNames)
-        {
-            if (path == null || !path.HasValue(addressableAssetSettings))
-            {
-                bool hasNewPath = variableNames.Contains(newPathName);
-                bool hasOldPath = variableNames.Contains(oldPathName);
-
-                if (hasNewPath && string.IsNullOrEmpty(path?.Id))
-                {
-                    path = new ProfileValueReference();
-                    path.SetVariableByName(addressableAssetSettings, newPathName);
-                    SetDirty(true);
-                }
-                else if (hasOldPath && string.IsNullOrEmpty(path?.Id))
-                {
-                    path = new ProfileValueReference();
-                    path.SetVariableByName(addressableAssetSettings, oldPathName);
-                    SetDirty(true);
-                }
-                else if (!hasOldPath && !hasNewPath)
-                    Debug.LogWarning("Default path variable " + newPathName + " not found when initializing BundledAssetGroupSchema. Please manually set the path via the groups window.");
-            }
         }
 
         internal override void Validate()
@@ -745,21 +860,24 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         {
             switch (InternalIdNamingMode)
             {
-                case AssetNamingMode.FullPath: return assetPath;
-                case AssetNamingMode.Filename: return isScene ? System.IO.Path.GetFileNameWithoutExtension(assetPath) : System.IO.Path.GetFileName(assetPath);
-                case AssetNamingMode.GUID: return pathToGUIDFunc(assetPath);
+                case AssetNamingMode.FullPath:
+                    return assetPath;
+                case AssetNamingMode.Filename:
+                    return isScene ? System.IO.Path.GetFileNameWithoutExtension(assetPath) : System.IO.Path.GetFileName(assetPath);
+                case AssetNamingMode.GUID:
+                    return pathToGUIDFunc(assetPath);
                 case AssetNamingMode.Dynamic:
-                {
-                    var g = pathToGUIDFunc(assetPath);
-                    if (isScene || otherLoadPaths == null)
-                        return g;
-                    var len = 1;
-                    var p = g.Substring(0, len);
-                    while (otherLoadPaths.Contains(p))
-                        p = g.Substring(0, ++len);
-                    otherLoadPaths.Add(p);
-                    return p;
-                }
+                    {
+                        var g = pathToGUIDFunc(assetPath);
+                        if (isScene || otherLoadPaths == null)
+                            return g;
+                        var len = 1;
+                        var p = g.Substring(0, len);
+                        while (otherLoadPaths.Contains(p))
+                            p = g.Substring(0, ++len);
+                        otherLoadPaths.Add(p);
+                        return p;
+                    }
             }
 
             return assetPath;
@@ -777,12 +895,19 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         /// </summary>
         public void OnAfterDeserialize()
         {
-            BuildPath.OnValueChanged += s => SetDirty(true);
-            LoadPath.OnValueChanged += s => SetDirty(true);
+            BuildPath.OnValueChanged -= OnPathValueChanged;
+            BuildPath.OnValueChanged += OnPathValueChanged;
+            LoadPath.OnValueChanged -= OnPathValueChanged;
+            LoadPath.OnValueChanged += OnPathValueChanged;
             if (m_AssetBundleProviderType.Value == null)
                 m_AssetBundleProviderType.Value = typeof(AssetBundleProvider);
             if (m_BundledAssetProviderType.Value == null)
                 m_BundledAssetProviderType.Value = typeof(BundledAssetProvider);
+        }
+
+        void OnPathValueChanged(ProfileValueReference _)
+        {
+            SetDirty(true);
         }
 
         /// <summary>
@@ -859,7 +984,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 enumValue = enumValue == 0 ? 1 : enumValue == 1 ? 0 : enumValue;
 
                 EditorGUI.BeginChangeCheck();
-                int newValue = EditorGUI.Popup(position, new GUIContent(label.text, "Controls how the output AssetBundles will be named."), enumValue, contents);
+                int newValue = EditorGUI.Popup(position, new GUIContent(label.text, label.tooltip), enumValue, contents);
                 if (EditorGUI.EndChangeCheck())
                 {
                     newValue = newValue == 0 ? 1 : newValue == 1 ? 0 : newValue;
@@ -915,6 +1040,56 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         }
 
         private bool m_ShowPaths = true;
+        private static GUIStyle s_SmallHelpBoxStyle;
+        private static GUIStyle s_SmallHelpBoxLabelStyle;
+        private static GUIStyle s_SmallHelpBoxLinkStyle;
+
+        void DrawContentDirectoryPromotionHelpBox()
+        {
+            if (s_SmallHelpBoxStyle == null)
+            {
+                s_SmallHelpBoxStyle = new GUIStyle(EditorStyles.helpBox)
+                {
+                    fontSize = 10
+                };
+            }
+
+            if (s_SmallHelpBoxLabelStyle == null)
+            {
+                s_SmallHelpBoxLabelStyle = new GUIStyle(EditorStyles.label)
+                {
+                    fontSize = 10,
+                    wordWrap = true
+                };
+            }
+
+            if (s_SmallHelpBoxLinkStyle == null)
+            {
+                s_SmallHelpBoxLinkStyle = new GUIStyle(EditorStyles.linkLabel)
+                {
+                    fontSize = 10
+                };
+            }
+
+            var content = new GUIContent(
+                "For the most up to date way of managing local content, use the Content Directory schema. " +
+                "To enable this, add the Content Directory schema to your group and disable this schema.",
+                EditorGUIUtility.IconContent("console.infoicon.sml").image);
+
+            EditorGUILayout.BeginVertical(s_SmallHelpBoxStyle);
+            {
+                GUILayout.Label(content, s_SmallHelpBoxLabelStyle);
+                EditorGUILayout.BeginHorizontal();
+                {
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("Read more...", s_SmallHelpBoxLinkStyle))
+                        Application.OpenURL(AddressableAssetUtility.GenerateContentDirectoriesDocsURL());
+                    EditorGUIUtility.AddCursorRect(GUILayoutUtility.GetLastRect(), MouseCursor.Link);
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            EditorGUILayout.EndVertical();
+        }
 
         /// <summary>
         /// Used for drawing properties in the inspector.
@@ -928,16 +1103,32 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         /// <inheritdoc/>
         public override void OnGUI()
         {
-            ShowSelectedPropertyPathPair(SchemaSerializedObject);
+            EditorGUI.BeginDisabledGroup(!IsEnabled);
 
-            AdvancedOptionsFoldout.IsActive = GUI.AddressablesGUIUtility.FoldoutWithHelp(AdvancedOptionsFoldout.IsActive, new GUIContent("Advanced Options"), () =>
+            // Show helpbox when Local paths are selected to promote Content Directory schema
+            if (Group != null && Group.Settings != null && !m_UseCustomPaths)
             {
-                string url = AddressableAssetUtility.GenerateDocsURL("ContentPackingAndLoadingSchema.html#advanced-options");
+                var loadPathName = m_LoadPath.GetName(Group.Settings);
+                if (loadPathName == AddressableAssetSettings.kLocalLoadPath)
+                {
+                    DrawContentDirectoryPromotionHelpBox();
+                    GUILayout.Space(k_HelpBoxUIPadding);
+                }
+            }
+
+            BuildAndLoadPathUIHelper.DrawPathPair(this, SchemaSerializedObject,
+                ref m_BuildPath, ref m_LoadPath, ref m_UseCustomPaths, ref m_ShowPaths,
+                ref m_SelectedPathPairIndex);
+
+            AdvancedOptionsFoldout.IsActive = GUI.AddressablesGUIUtility.BeginFoldoutHeaderGroupWithHelp(AdvancedOptionsFoldout.IsActive, new GUIContent("Advanced Options"), () =>
+            {
+                string url = AddressableAssetUtility.GenerateDocsURL("group-inspector-settings-reference.html#advanced-options");
                 Application.OpenURL(url);
-            });
+            }, 10);
             if (AdvancedOptionsFoldout.IsActive)
                 ShowAdvancedProperties(SchemaSerializedObject);
             SchemaSerializedObject.ApplyModifiedProperties();
+            EditorGUI.EndDisabledGroup();
         }
 
         /// <inheritdoc/>
@@ -946,40 +1137,62 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges = null;
 
             List<BundledAssetGroupSchema> otherBundledSchemas = new List<BundledAssetGroupSchema>();
-            foreach (var schema in otherSchemas)
+            foreach (var otherSchema in otherSchemas)
             {
-                otherBundledSchemas.Add(schema as BundledAssetGroupSchema);
+                if (otherSchema is BundledAssetGroupSchema otherBundledSchema)
+                    otherBundledSchemas.Add(otherBundledSchema);
+            }
+
+            EditorGUI.BeginDisabledGroup(!IsEnabled);
+
+            // Show helpbox when Local paths are selected to promote Content Directory schema
+            if (Group != null && Group.Settings != null && !m_UseCustomPaths)
+            {
+                var loadPathName = m_LoadPath.GetName(Group.Settings);
+                if (loadPathName == AddressableAssetSettings.kLocalLoadPath)
+                {
+                    DrawContentDirectoryPromotionHelpBox();
+                    GUILayout.Space(k_HelpBoxUIPadding);
+                }
             }
 
             foreach (var schema in otherBundledSchemas)
                 schema.m_ShowPaths = m_ShowPaths;
-            ShowSelectedPropertyPathPairMulti(SchemaSerializedObject, otherSchemas, ref queuedChanges,
-                (src, dst) =>
-                {
-                    dst.m_BuildPath.Id = src.BuildPath.Id;
-                    dst.m_LoadPath.Id = src.LoadPath.Id;
-                    dst.m_UseCustomPaths = src.m_UseCustomPaths;
-                    dst.SelectedPathPairIndex = src.SelectedPathPairIndex;
-                    dst.SetDirty(true);
-                });
 
-            EditorGUI.BeginChangeCheck();
-            AdvancedOptionsFoldout.IsActive = GUI.AddressablesGUIUtility.BeginFoldoutHeaderGroupWithHelp(AdvancedOptionsFoldout.IsActive, new GUIContent("Advanced Options"), () =>
+            bool pathPairModified = BuildAndLoadPathUIHelper.DrawPathPairMulti(this, SchemaSerializedObject, otherSchemas,
+                ref m_BuildPath, ref m_LoadPath, ref m_UseCustomPaths, ref m_ShowPaths,
+                ref m_SelectedPathPairIndex);
+
+            if (pathPairModified)
             {
-                string url = AddressableAssetUtility.GenerateDocsURL("ContentPackingAndLoadingSchema.html#advanced-options");
-                Application.OpenURL(url);
-            }, 10);
-            if (AdvancedOptionsFoldout.IsActive)
-            {
-                ShowAdvancedPropertiesMulti(SchemaSerializedObject, otherSchemas, otherBundledSchemas, ref queuedChanges);
+                Undo.SetCurrentGroupName("BundledAssetGroupSchemas BuildAndLoad Undos");
+                foreach (var schema in otherBundledSchemas)
+                {
+                    Undo.RecordObject(schema, "BundledAssetGroupSchema BuildAndLoad" + schema.name);
+                    SetPathPairOption(this, schema);
+                }
+                Undo.CollapseUndoOperations(Undo.GetCurrentGroup());
             }
 
-            EditorGUI.EndFoldoutHeaderGroup();
+            if (otherBundledSchemas.Count > 0)
+            {
+                EditorGUI.BeginChangeCheck();
+                AdvancedOptionsFoldout.IsActive = GUI.AddressablesGUIUtility.BeginFoldoutHeaderGroupWithHelp(AdvancedOptionsFoldout.IsActive, new GUIContent("Advanced Options"), () =>
+                {
+                    string url = AddressableAssetUtility.GenerateDocsURL("group-inspector-settings-reference.html#advanced-options");
+                    Application.OpenURL(url);
+                }, 10);
+                if (AdvancedOptionsFoldout.IsActive)
+                {
+                    ShowAdvancedPropertiesMulti(SchemaSerializedObject, otherBundledSchemas, ref queuedChanges);
+                }
+                EditorGUI.EndFoldoutHeaderGroup();
+            }
 
             SchemaSerializedObject.ApplyModifiedProperties();
             if (queuedChanges != null)
             {
-                Undo.SetCurrentGroupName("bundledAssetGroupSchemasUndos");
+                Undo.SetCurrentGroupName("BundledAssetGroupSchemasUndos");
                 foreach (var schema in otherBundledSchemas)
                     Undo.RecordObject(schema, "BundledAssetGroupSchema" + schema.name);
 
@@ -988,29 +1201,9 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                     foreach (var schema in otherBundledSchemas)
                         change.Invoke(this, schema);
                 }
+                Undo.CollapseUndoOperations(Undo.GetCurrentGroup());
             }
-
-            Undo.CollapseUndoOperations(Undo.GetCurrentGroup());
-        }
-
-        void ShowPaths(SerializedObject so)
-        {
-            ShowSelectedPropertyPath(so, nameof(m_BuildPath), null, ref m_BuildPath);
-            ShowSelectedPropertyPath(so, nameof(m_LoadPath), null, ref m_LoadPath);
-        }
-
-        void ShowPathsMulti(SerializedObject so, List<AddressableAssetGroupSchema> otherBundledSchemas, ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges)
-        {
-            ShowSelectedPropertyMulti(so, nameof(m_BuildPath), null, otherBundledSchemas, ref queuedChanges, (src, dst) =>
-            {
-                dst.m_BuildPath.Id = src.BuildPath.Id;
-                dst.SetDirty(true);
-            }, m_BuildPath.Id, ref m_BuildPath);
-            ShowSelectedPropertyMulti(so, nameof(m_LoadPath), null, otherBundledSchemas, ref queuedChanges, (src, dst) =>
-            {
-                dst.m_LoadPath.Id = src.LoadPath.Id;
-                dst.SetDirty(true);
-            }, m_LoadPath.Id, ref m_LoadPath);
+            EditorGUI.EndDisabledGroup();
         }
 
         static GUI.FoldoutSessionStateValue AdvancedOptionsFoldout = new GUI.FoldoutSessionStateValue("Addressables.BundledAssetGroup.AdvancedOptions");
@@ -1027,6 +1220,15 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             new GUIContent("Enabled, Excluding Cached", "Bundles that have already been downloaded and cached will not have their CRC check when loading, otherwise CRC check will be performed.")
         };
 
+        GUIContent m_CacheProbeModeContent = new GUIContent("Cache Probe Mode",
+            "How Addressables checks whether a bundle version is already in the local cache.");
+
+        private GUIContent[] m_CacheProbeModePopupContent = new GUIContent[]
+        {
+            new GUIContent("Cached Versions (Fast)", "Reads no files. Fastest, but a damaged cache entry can report as present; rely on CRC checks to catch it."),
+            new GUIContent("Version Marker File (Strict)", "Reads each entry's marker file, so a damaged entry reports as missing. Costs roughly a millisecond per cached bundle.")
+        };
+
         GUIContent m_IncludeAddressInCatalogContent = new GUIContent("Include Addresses in Catalog",
             "If disabled, addresses from this group will not be included in the catalog.  This is useful for reducing the size of the catalog if addresses are not needed.");
 
@@ -1036,9 +1238,15 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         GUIContent m_IncludeLabelsInCatalogContent = new GUIContent("Include Labels in Catalog",
             "If disabled, labels from this group will not be included in the catalog.  This is useful for reducing the size of the catalog if labels are not needed.");
 
+        GUIContent m_IncludeFolderKeysInCatalogContent = new GUIContent("Include Folder Keys in Catalog",
+            "If enabled, each addressable folder's address is included as a shared key on every asset in that folder, so the folder's address can be used to load every asset inside it in one call.  If disabled, this is useful for reducing the size of the catalog if whole-folder loading is not needed.");
+
+        GUIContent m_IncludeAddressesForFolderChildrenContent = new GUIContent("Include Individual Addresses for Folder Assets",
+            "If disabled, assets inside an addressable folder will not have their own individual address included in the catalog -- only the folder's shared key will be included.  GUIDs are unaffected.  Disable this if you always load these assets via the folder to reduce the size of the catalog.");
+
         GUIContent m_CacheClearBehaviorContent = new GUIContent("Cache Clear Behavior", "Controls how old cached asset bundles are cleared.");
-        GUIContent m_BundleModeContent = new GUIContent("Bundle Mode", "Controls how bundles are created from this group.");
-        GUIContent m_BundleNamingContent = new GUIContent("Bundle Naming Mode", "Controls the final file naming mode for bundles in this group.");
+        GUIContent m_BundleNamingModeContent = new GUIContent("Bundle Naming Mode", "Controls the final file naming mode for bundles in this group.");
+        GUIContent m_BundlePackModeContent = new GUIContent("Bundle Packing Mode", "Controls how content in a Group gets packed into AssetBundles.");
 
         private const string k_UseDefaultsLabel = "Use Defaults";
         GUIContent m_UseDefaultSettingsContent = new GUIContent(k_UseDefaultsLabel, $"Determines whether to use the default schema settings.");
@@ -1099,15 +1307,18 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                     }
                 }
                 CRCPropertyPopupField(so, buildTargetSupportsBundleCaching);
+                CacheProbeModePopupField(so, buildTargetSupportsBundleCaching);
 
                 EditorGUI.BeginChangeCheck();
-                var bundleNaming = (BundleNamingStyle)EditorGUILayout.EnumPopup(m_BundleNamingContent, BundleNaming);
+                SerializedProperty serializedProperty = so.FindProperty(nameof(m_BundleNaming));
+                Rect rect = EditorGUILayout.GetControlRect();
+                var bundleNaming = (BundleNamingStyle)BundleNamingStylePropertyDrawer.DrawGUI(rect, serializedProperty, m_BundleNamingModeContent);
                 if (EditorGUI.EndChangeCheck())
                 {
                     Undo.RecordObject(so.targetObject, so.targetObject.name + nameof(BundleNaming));
                     BundleNaming = bundleNaming;
                 }
-                EditorGUI.BeginDisabledGroup(settings.UseUnityWebRequestForLocalBundles);
+                EditorGUI.BeginDisabledGroup(settings?.UseUnityWebRequestForLocalBundles ?? false);
                 EditorGUI.BeginChangeCheck();
                 bool stripDLOptions = EditorGUILayout.Toggle(m_StripDownloadOptionsContent, StripDownloadOptions);
                 if (EditorGUI.EndChangeCheck())
@@ -1123,7 +1334,14 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             EditorGUILayout.PropertyField(so.FindProperty(nameof(m_IncludeAddressInCatalog)), m_IncludeAddressInCatalogContent, true);
             EditorGUILayout.PropertyField(so.FindProperty(nameof(m_IncludeGUIDInCatalog)), m_IncludeGUIDInCatalogContent, true);
             EditorGUILayout.PropertyField(so.FindProperty(nameof(m_IncludeLabelsInCatalog)), m_IncludeLabelsInCatalogContent, true);
-            EditorGUILayout.PropertyField(so.FindProperty(nameof(m_BundleMode)), m_BundleModeContent, true);
+            EditorGUILayout.PropertyField(so.FindProperty(nameof(m_IncludeFolderKeysInCatalog)), m_IncludeFolderKeysInCatalogContent, true);
+            if (m_IncludeFolderKeysInCatalog)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(so.FindProperty(nameof(m_IncludeAddressesForFolderChildren)), m_IncludeAddressesForFolderChildrenContent, true);
+                EditorGUI.indentLevel--;
+            }
+            EditorGUILayout.PropertyField(so.FindProperty(nameof(m_BundleMode)), m_BundlePackModeContent, true);
         }
 
         void CRCPropertyPopupField(SerializedObject so, bool buildTargetSupportsCaching)
@@ -1136,31 +1354,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
 
                 int newEnumIndex = EditorGUILayout.Popup(m_AssetBundleCrcContent, enumIndex, m_CrcPopupContent);
                 if (enumIndex != newEnumIndex)
-                {
-                    if (newEnumIndex != 0)
-                    {
-                        if (!UseAssetBundleCrc)
-                        {
-                            Undo.RecordObject(so.targetObject, so.targetObject.name + nameof(UseAssetBundleCrc));
-                            UseAssetBundleCrc = true;
-                        }
-                        if (newEnumIndex == 1 && !UseAssetBundleCrcForCachedBundles)
-                        {
-                            Undo.RecordObject(so.targetObject, so.targetObject.name + nameof(UseAssetBundleCrcForCachedBundles));
-                            UseAssetBundleCrcForCachedBundles = true;
-                        }
-                        else if (newEnumIndex == 2 && UseAssetBundleCrcForCachedBundles)
-                        {
-                            Undo.RecordObject(so.targetObject, so.targetObject.name + nameof(UseAssetBundleCrcForCachedBundles));
-                            UseAssetBundleCrcForCachedBundles = false;
-                        }
-                    }
-                    else
-                    {
-                        Undo.RecordObject(so.targetObject, so.targetObject.name + nameof(UseAssetBundleCrc));
-                        UseAssetBundleCrc = false;
-                    }
-                }
+                    SetCrcFromPopupIndex(newEnumIndex, so.targetObject);
             }
             else
             {
@@ -1174,13 +1368,80 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             }
         }
 
+        /// <summary>
+        /// Applies a CRC dropdown selection to the two CRC flags, recording undo.
+        /// </summary>
+        /// <param name="newEnumIndex">The newly selected popup index (0, 1, or 2).</param>
+        /// <param name="undoTarget">The object to record for undo.</param>
+        internal void SetCrcFromPopupIndex(int newEnumIndex, UnityEngine.Object undoTarget)
+        {
+            bool useCrc = newEnumIndex != 0;
+            bool useCrcForCached = newEnumIndex == 1;
+
+            if (UseAssetBundleCrc != useCrc)
+            {
+                Undo.RecordObject(undoTarget, undoTarget.name + nameof(UseAssetBundleCrc));
+                UseAssetBundleCrc = useCrc;
+            }
+            if (UseAssetBundleCrcForCachedBundles != useCrcForCached)
+            {
+                Undo.RecordObject(undoTarget, undoTarget.name + nameof(UseAssetBundleCrcForCachedBundles));
+                UseAssetBundleCrcForCachedBundles = useCrcForCached;
+            }
+        }
+
+        void CacheProbeModePopupField(SerializedObject so, bool buildTargetSupportsCaching)
+        {
+            // Without bundle caching there is nothing to probe, so the control is hidden.
+            if (!buildTargetSupportsCaching)
+                return;
+
+            int enumIndex = CacheProbeMode == CacheProbeMode.IsVersionCached ? 1 : 0;
+
+            int newEnumIndex = EditorGUILayout.Popup(m_CacheProbeModeContent, enumIndex, m_CacheProbeModePopupContent);
+            if (enumIndex != newEnumIndex)
+                SetCacheProbeModeFromPopupIndex(newEnumIndex, so.targetObject);
+        }
+
+        /// <summary>
+        /// Applies a Cache Probe Mode dropdown selection, recording undo.
+        /// </summary>
+        /// <param name="newEnumIndex">The newly selected popup index (0 or 1).</param>
+        /// <param name="undoTarget">The object to record for undo.</param>
+        internal void SetCacheProbeModeFromPopupIndex(int newEnumIndex, UnityEngine.Object undoTarget)
+        {
+            var mode = newEnumIndex == 1 ? CacheProbeMode.IsVersionCached : CacheProbeMode.CachedVersions;
+            if (CacheProbeMode == mode)
+                return;
+
+            Undo.RecordObject(undoTarget, undoTarget.name + nameof(CacheProbeMode));
+            CacheProbeMode = mode;
+        }
+
+        void CacheProbeModePopupFieldMulti(SerializedObject so, bool buildTargetSupportsCaching, List<BundledAssetGroupSchema> otherBundledSchemas, ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges)
+        {
+            if (buildTargetSupportsCaching)
+            {
+                ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.CacheProbeMode != b.CacheProbeMode);
+
+                EditorGUI.BeginChangeCheck();
+                CacheProbeModePopupField(so, buildTargetSupportsCaching);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    AddQueuedChanges(ref queuedChanges, (src, dst) => dst.CacheProbeMode = src.CacheProbeMode);
+                    EditorUtility.SetDirty(this);
+                }
+                EditorGUI.showMixedValue = false;
+            }
+        }
+
         void CRCPropertyPopupFieldMulti(SerializedObject so, bool buildTargetSupportsCaching, List<BundledAssetGroupSchema> otherBundledSchemas, ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges)
         {
             if (buildTargetSupportsCaching)
             {
-                ShowMixedValue(this, otherBundledSchemas, (a, b) => a.UseAssetBundleCrc != b.UseAssetBundleCrc);
+                ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.UseAssetBundleCrc != b.UseAssetBundleCrc);
                 if (!EditorGUI.showMixedValue)
-                    ShowMixedValue(this, otherBundledSchemas, (a, b) => a.UseAssetBundleCrcForCachedBundles != b.UseAssetBundleCrcForCachedBundles);
+                    ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.UseAssetBundleCrcForCachedBundles != b.UseAssetBundleCrcForCachedBundles);
 
                 EditorGUI.BeginChangeCheck();
                 CRCPropertyPopupField(so, buildTargetSupportsCaching);
@@ -1199,21 +1460,22 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
         }
 
 
-        void ShowMixedValue(BundledAssetGroupSchema schema, List<BundledAssetGroupSchema> otherBundledSchemas, Func<BundledAssetGroupSchema, BundledAssetGroupSchema, bool> showMixedValue)
+        bool ShowMixedValueAdvancedProperty(BundledAssetGroupSchema schema, List<BundledAssetGroupSchema> otherBundledSchemas, Func<BundledAssetGroupSchema, BundledAssetGroupSchema, bool> showMixedValue)
         {
             foreach (BundledAssetGroupSchema bundledSchema in otherBundledSchemas)
             {
                 if (showMixedValue.Invoke(schema, bundledSchema))
                 {
                     EditorGUI.showMixedValue = true;
-                    break;
+                    return true;
                 }
             }
+            return false;
         }
 
-        void ShowAdvancedPropertiesMulti(SerializedObject so, List<AddressableAssetGroupSchema> otherSchemas, List<BundledAssetGroupSchema> otherBundledSchemas, ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges)
+        void ShowAdvancedPropertiesMulti(SerializedObject so, List<BundledAssetGroupSchema> otherSchemas, ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges)
         {
-            ShowSelectedPropertyDefaultSettingsMulti(so, otherBundledSchemas, ref queuedChanges);
+            ShowSelectedPropertyDefaultSettingsMulti(so, otherSchemas, ref queuedChanges);
             GUILayout.Space(m_PostBlockContentSpace);
 
             ShowSelectedPropertyMulti(so, nameof(m_IncludeAddressInCatalog), m_IncludeAddressInCatalogContent, otherSchemas, ref queuedChanges,
@@ -1222,10 +1484,19 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 (src, dst) => dst.IncludeGUIDInCatalog = src.IncludeGUIDInCatalog, ref m_IncludeGUIDInCatalog);
             ShowSelectedPropertyMulti(so, nameof(m_IncludeLabelsInCatalog), m_IncludeLabelsInCatalogContent, otherSchemas, ref queuedChanges,
                 (src, dst) => dst.IncludeLabelsInCatalog = src.IncludeLabelsInCatalog, ref m_IncludeLabelsInCatalog);
-            ShowSelectedPropertyMulti(so, nameof(m_BundleMode), m_BundleModeContent, otherSchemas, ref queuedChanges, (src, dst) => dst.BundleMode = src.BundleMode, ref m_BundleMode);
+            ShowSelectedPropertyMulti(so, nameof(m_IncludeFolderKeysInCatalog), m_IncludeFolderKeysInCatalogContent, otherSchemas, ref queuedChanges,
+                (src, dst) => dst.IncludeFolderKeysInCatalog = src.IncludeFolderKeysInCatalog, ref m_IncludeFolderKeysInCatalog);
+            if (m_IncludeFolderKeysInCatalog)
+            {
+                EditorGUI.indentLevel++;
+                ShowSelectedPropertyMulti(so, nameof(m_IncludeAddressesForFolderChildren), m_IncludeAddressesForFolderChildrenContent, otherSchemas, ref queuedChanges,
+                    (src, dst) => dst.IncludeAddressesForFolderChildren = src.IncludeAddressesForFolderChildren, ref m_IncludeAddressesForFolderChildren);
+                EditorGUI.indentLevel--;
+            }
+            ShowSelectedPropertyMulti(so, nameof(m_BundleMode), m_BundlePackModeContent, otherSchemas, ref queuedChanges, (src, dst) => dst.BundleMode = src.BundleMode, ref m_BundleMode);
         }
 
-        void ShowSelectedPropertyMulti<T>(SerializedObject so, string propertyName, GUIContent label, List<AddressableAssetGroupSchema> otherSchemas,
+        void ShowSelectedPropertyMulti<T>(SerializedObject so, string propertyName, GUIContent label, List<BundledAssetGroupSchema> otherSchemas,
             ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges, Action<BundledAssetGroupSchema, BundledAssetGroupSchema> a, ref T propertyValue)
         {
             SerializedProperty serializedProperty = so.FindProperty(propertyName);
@@ -1271,7 +1542,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             {
                 if (serializedPropertyType != SerializedPropertyType.Generic)
                 {
-                    HashSet<SerializedProperty> properties = new HashSet<SerializedProperty>() {serializedProperty};
+                    HashSet<SerializedProperty> properties = new HashSet<SerializedProperty>() { serializedProperty };
                     foreach (AddressableAssetGroupSchema otherSchema in otherSchemas)
                         properties.Add(otherSchema.SchemaSerializedObject.FindProperty(propertyName));
 
@@ -1305,201 +1576,9 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             EditorGUI.showMixedValue = false;
         }
 
-        void ShowSelectedPropertyMulti(SerializedObject so, string propertyName, GUIContent label,
-            List<AddressableAssetGroupSchema> otherSchemas,
-            ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges,
-            Action<BundledAssetGroupSchema, BundledAssetGroupSchema> a, string previousValue, ref ProfileValueReference currentValue)
-        {
-            var prop = so.FindProperty(propertyName);
-            ShowMixedValue(prop, otherSchemas, typeof(ProfileValueReference), propertyName);
-
-            EditorGUI.BeginChangeCheck();
-            EditorGUILayout.PropertyField(prop, label, true);
-            if (EditorGUI.EndChangeCheck())
-            {
-                var newValue = currentValue.Id;
-                currentValue.Id = previousValue;
-                Undo.RecordObject(so.targetObject, so.targetObject.name + propertyName);
-                currentValue.Id = newValue;
-                if (queuedChanges == null)
-                    queuedChanges = new List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>>();
-                queuedChanges.Add(a);
-            }
-
-            EditorGUI.showMixedValue = false;
-        }
-
-        void ShowSelectedPropertyPath(SerializedObject so, string propertyName, GUIContent label, ref ProfileValueReference currentValue)
-        {
-            var prop = so.FindProperty(propertyName);
-            string previousValue = currentValue.Id;
-            EditorGUI.BeginChangeCheck();
-            //Current implementation using ProfileValueReferenceDrawer
-            EditorGUILayout.PropertyField(prop, label, true);
-            if (EditorGUI.EndChangeCheck())
-            {
-                var newValue = currentValue.Id;
-                currentValue.Id = previousValue;
-                Undo.RecordObject(so.targetObject, so.targetObject.name + propertyName);
-                currentValue.Id = newValue;
-                EditorUtility.SetDirty(this);
-            }
-
-            EditorGUI.showMixedValue = false;
-        }
-
-        void ShowSelectedPropertyPathPairMulti(SerializedObject so, List<AddressableAssetGroupSchema> otherSchemas, ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges,
-            Action<BundledAssetGroupSchema, BundledAssetGroupSchema> a)
-        {
-            var buildPathProperty = so.FindProperty(nameof(m_BuildPath));
-            var loadPathProperty = so.FindProperty(nameof(m_LoadPath));
-            ShowMixedValue(buildPathProperty, otherSchemas, typeof(ProfileValueReference), nameof(m_BuildPath));
-            ShowMixedValue(loadPathProperty, otherSchemas, typeof(ProfileValueReference), nameof(m_LoadPath));
-
-            List<ProfileGroupType> groupTypes = ProfileGroupType.CreateGroupTypes(settings.profileSettings.GetProfile(settings.activeProfileId), settings);
-            List<string> options = groupTypes.Select(group => group.GroupTypePrefix).ToList();
-            //set selected to custom
-            options.Add(AddressableAssetProfileSettings.customEntryString);
-            int? selected = null;
-
-            //Determine selection and whether to show custom
-            if (!EditorGUI.showMixedValue)
-            {
-                //disregard custom value, want to check if valid pair
-                selected = DetermineSelectedIndex(groupTypes, options.Count - 1, settings);
-                if (selected != options.Count - 1)
-                {
-                    m_UseCustomPaths = false;
-                }
-                else
-                {
-                    m_UseCustomPaths = true;
-                }
-            }
-
-            //Dropdown selector
-            EditorGUI.BeginChangeCheck();
-            var newIndex = EditorGUILayout.Popup(m_BuildAndLoadPathsGUIContent, selected.HasValue ? selected.Value : -1, options.ToArray());
-            if (EditorGUI.EndChangeCheck() && newIndex != selected)
-            {
-                selected = newIndex;
-                SetPathPairOption(so, options, groupTypes, newIndex);
-
-                if (queuedChanges == null)
-                    queuedChanges = new List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>>();
-                queuedChanges.Add(a);
-                EditorGUI.showMixedValue = false;
-            }
-
-            if (m_UseCustomPaths && selected.HasValue)
-            {
-                ShowPathsMulti(so, otherSchemas, ref queuedChanges);
-            }
-
-            ShowPathsPreview(!selected.HasValue);
-            EditorGUI.showMixedValue = false;
-        }
-
-        void ShowSelectedPropertyPathPair(SerializedObject so)
-        {
-            List<ProfileGroupType> groupTypes = ProfileGroupType.CreateGroupTypes(settings.profileSettings.GetProfile(settings.activeProfileId), settings);
-            List<string> options = groupTypes.Select(group => group.GroupTypePrefix).ToList();
-            //Set selected to custom
-            options.Add(AddressableAssetProfileSettings.customEntryString);
-
-            //Determine selection and whether to show custom
-
-            int? selected = DetermineSelectedIndex(groupTypes, options.Count - 1, settings);
-            if (selected.HasValue && selected != options.Count - 1)
-            {
-                m_UseCustomPaths = false;
-            }
-            else
-            {
-                m_UseCustomPaths = true;
-            }
-
-            //Dropdown selector
-            EditorGUI.BeginChangeCheck();
-            var newIndex = EditorGUILayout.Popup(m_BuildAndLoadPathsGUIContent, selected.HasValue ? selected.Value : options.Count - 1, options.ToArray());
-            if (EditorGUI.EndChangeCheck() && newIndex != selected)
-            {
-                SetPathPairOption(so, options, groupTypes, newIndex);
-                EditorUtility.SetDirty(this);
-            }
-
-            if (m_UseCustomPaths)
-            {
-                ShowPaths(so);
-            }
-
-            ShowPathsPreview(false);
-            EditorGUI.showMixedValue = false;
-        }
-
-        internal int DetermineSelectedIndex(List<ProfileGroupType> groupTypes, int defaultValue, AddressableAssetSettings addressableAssetSettings)
-        {
-            HashSet<string> vars = addressableAssetSettings.profileSettings.GetAllVariableIds();
-            return DetermineSelectedIndex(groupTypes, defaultValue, addressableAssetSettings, vars);
-        }
-
         internal int DetermineSelectedIndex(List<ProfileGroupType> groupTypes, int defaultValue, AddressableAssetSettings addressableAssetSettings, HashSet<string> vars)
         {
-            int selected = defaultValue;
-
-            if (addressableAssetSettings == null)
-                return defaultValue;
-
-            if (vars.Contains(m_BuildPath.Id) && vars.Contains(m_LoadPath.Id) && !m_UseCustomPaths)
-            {
-                for (int i = 0; i < groupTypes.Count; i++)
-                {
-                    ProfileGroupType.GroupTypeVariable buildPathVar = groupTypes[i].GetVariableBySuffix("BuildPath");
-                    ProfileGroupType.GroupTypeVariable loadPathVar = groupTypes[i].GetVariableBySuffix("LoadPath");
-                    if (m_BuildPath.GetName(addressableAssetSettings) == groupTypes[i].GetName(buildPathVar) && m_LoadPath.GetName(addressableAssetSettings) == groupTypes[i].GetName(loadPathVar))
-                    {
-                        selected = i;
-                        break;
-                    }
-                }
-            }
-
-            return selected;
-        }
-
-        internal void SetPathPairOption(SerializedObject so, List<string> options, List<ProfileGroupType> groupTypes, int newIndex)
-        {
-            SelectedPathPairIndex = newIndex;
-
-            if (options[newIndex] != AddressableAssetProfileSettings.customEntryString)
-            {
-                Undo.RecordObject(so.targetObject, so.targetObject.name + "Path Pair");
-                m_BuildPath.SetVariableByName(settings, groupTypes[newIndex].GroupTypePrefix + ProfileGroupType.k_PrefixSeparator + "BuildPath");
-                m_LoadPath.SetVariableByName(settings, groupTypes[newIndex].GroupTypePrefix + ProfileGroupType.k_PrefixSeparator + "LoadPath");
-                m_UseCustomPaths = false;
-            }
-            else
-            {
-                Undo.RecordObject(so.targetObject, so.targetObject.name + "Path Pair");
-                m_UseCustomPaths = true;
-            }
-        }
-
-        void ShowPathsPreview(bool showMixedValue)
-        {
-            EditorGUI.indentLevel++;
-            m_ShowPaths = EditorGUILayout.Foldout(m_ShowPaths, m_PathsPreviewGUIContent, true);
-            if (m_ShowPaths)
-            {
-                EditorStyles.helpBox.fontSize = 12;
-                var buildPathValue = !string.IsNullOrEmpty(m_BuildPath.Id) ? m_BuildPath.GetValue(settings) : "";
-                var loadPathValue = !string.IsNullOrEmpty(m_LoadPath.Id) ? m_LoadPath.GetValue(settings) : "";
-                EditorGUILayout.HelpBox(String.Format("Build Path: {0}", showMixedValue ? "-" : buildPathValue),
-                    MessageType.None);
-                EditorGUILayout.HelpBox(String.Format("Load Path: {0}", showMixedValue ? "-" : loadPathValue), MessageType.None);
-            }
-
-            EditorGUI.indentLevel--;
+            return BuildAndLoadPathUIHelper.DetermineSelectedIndex(BuildPath, LoadPath, m_UseCustomPaths, groupTypes, defaultValue, addressableAssetSettings, vars);
         }
 
         void AddQueuedChanges(ref List<Action<BundledAssetGroupSchema, BundledAssetGroupSchema>> queuedChanges, Action<BundledAssetGroupSchema, BundledAssetGroupSchema> a)
@@ -1521,7 +1600,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
 
             if (!selectedSchemaIsUsingCustomPaths)
             {
-                ShowMixedValue(this, otherBundledSchemas, (a, b) => a.UseDefaultSchemaSettings != b.UseDefaultSchemaSettings);
+                ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.UseDefaultSchemaSettings != b.UseDefaultSchemaSettings);
                 EditorGUI.BeginChangeCheck();
                 bool useDefaultSettings = EditorGUILayout.Toggle(m_UseDefaultSettingsContent, UseDefaultSchemaSettings);
                 if (EditorGUI.EndChangeCheck())
@@ -1531,7 +1610,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
 
             using (new EditorGUI.DisabledScope(selectedSchemaIsUsingDefaultSettings))
             {
-                ShowMixedValue(this, otherBundledSchemas, (a, b) => a.Compression != b.Compression);
+                ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.Compression != b.Compression);
                 EditorGUI.BeginChangeCheck();
                 var compression = (BundleCompressionMode)EditorGUILayout.EnumPopup(m_CompressionContent, Compression);
                 if (EditorGUI.EndChangeCheck())
@@ -1541,16 +1620,16 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 bool buildTargetSupportsBundleCaching = BuildTargetSupportsBundleCaching(EditorUserBuildSettings.activeBuildTarget);
                 if (buildTargetSupportsBundleCaching)
                 {
-                    ShowMixedValue(this, otherBundledSchemas, (a, b) => a.UseAssetBundleCache != b.UseAssetBundleCache);
+                    bool showMixedValueUseCache = ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.UseAssetBundleCache != b.UseAssetBundleCache);
                     EditorGUI.BeginChangeCheck();
                     bool useAssetBundleCache = EditorGUILayout.Toggle(m_UseAssetBundleCacheContent, UseAssetBundleCache);
                     if (EditorGUI.EndChangeCheck())
                         AddQueuedChanges(ref queuedChanges, (src, dst) => src.UseAssetBundleCache = dst.UseAssetBundleCache = useAssetBundleCache);
                     EditorGUI.showMixedValue = false;
 
-                    if (UseAssetBundleCache)
+                    if (UseAssetBundleCache && !showMixedValueUseCache)
                     {
-                        ShowMixedValue(this, otherBundledSchemas, (a, b) => a.AssetBundledCacheClearBehavior != b.AssetBundledCacheClearBehavior);
+                        ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.AssetBundledCacheClearBehavior != b.AssetBundledCacheClearBehavior);
                         EditorGUI.BeginChangeCheck();
                         var cacheClearBehavior = (CacheClearBehavior)EditorGUILayout.EnumPopup(m_CacheClearBehaviorContent, AssetBundledCacheClearBehavior);
                         if (EditorGUI.EndChangeCheck())
@@ -1559,16 +1638,19 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                     }
                 }
                 CRCPropertyPopupFieldMulti(so, buildTargetSupportsBundleCaching, otherBundledSchemas, ref queuedChanges);
+                CacheProbeModePopupFieldMulti(so, buildTargetSupportsBundleCaching, otherBundledSchemas, ref queuedChanges);
 
-                ShowMixedValue(this, otherBundledSchemas, (a, b) => a.BundleNaming != b.BundleNaming);
+                ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.BundleNaming != b.BundleNaming);
                 EditorGUI.BeginChangeCheck();
-                var bundleNaming = (BundleNamingStyle)EditorGUILayout.EnumPopup(m_BundleModeContent, BundleNaming);
+                SerializedProperty serializedProperty = so.FindProperty(nameof(m_BundleNaming));
+                Rect rect = EditorGUILayout.GetControlRect();
+                var bundleNaming = (BundleNamingStyle)BundleNamingStylePropertyDrawer.DrawGUI(rect, serializedProperty, m_BundleNamingModeContent);
                 if (EditorGUI.EndChangeCheck())
                     AddQueuedChanges(ref queuedChanges, (src, dst) => src.BundleNaming = dst.BundleNaming = bundleNaming);
                 EditorGUI.showMixedValue = false;
 
 
-                ShowMixedValue(this, otherBundledSchemas, (a, b) => a.StripDownloadOptions != b.StripDownloadOptions);
+                ShowMixedValueAdvancedProperty(this, otherBundledSchemas, (a, b) => a.StripDownloadOptions != b.StripDownloadOptions);
                 EditorGUI.BeginChangeCheck();
                 bool stripDLOptions = EditorGUILayout.Toggle(m_StripDownloadOptionsContent, StripDownloadOptions);
                 if (EditorGUI.EndChangeCheck())
@@ -1643,6 +1725,11 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             /// </summary>
             public bool useAssetBundleCrcForCachedBundles;
             /// <summary>
+            /// The recommended way to ask the cache whether a bundle version is downloaded.
+            /// Every platform recommends <see cref="CacheProbeMode.CachedVersions"/>.
+            /// </summary>
+            public CacheProbeMode cacheProbeMode;
+            /// <summary>
             /// The recommended naming style for AssetBundle file name.
             /// </summary>
             public BundleNamingStyle bundleNaming;
@@ -1672,6 +1759,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultLocalSettings.useAssetBundleCrc = false;
                 defaultLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultLocalSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultLocalSettings.stripDownloadOptions = true;
 
@@ -1680,6 +1768,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultRemoteSettings.useAssetBundleCrc = true;
                 defaultRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultRemoteSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultRemoteSettings.stripDownloadOptions = false;
 #elif UNITY_PS4
@@ -1688,6 +1777,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultLocalSettings.useAssetBundleCrc = false;
                 defaultLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultLocalSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultLocalSettings.stripDownloadOptions = true;
 
@@ -1696,6 +1786,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultRemoteSettings.useAssetBundleCrc = true;
                 defaultRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultRemoteSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultRemoteSettings.stripDownloadOptions = false;
 #elif UNITY_PS5
@@ -1704,6 +1795,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultLocalSettings.useAssetBundleCrc = false;
                 defaultLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultLocalSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultLocalSettings.stripDownloadOptions = true;
 
@@ -1712,6 +1804,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultRemoteSettings.useAssetBundleCrc = true;
                 defaultRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultRemoteSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultRemoteSettings.stripDownloadOptions = false;
 #elif UNITY_GAMECORE || UNITY_GAMECORE_XBOXONE || UNITY_GAMECORE_XBOXSERIES || UNITY_XBOXONE
@@ -1720,6 +1813,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultLocalSettings.useAssetBundleCrc = false;
                 defaultLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultLocalSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultLocalSettings.stripDownloadOptions = true;
 
@@ -1728,6 +1822,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultRemoteSettings.useAssetBundleCrc = true;
                 defaultRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultRemoteSettings.bundleNaming = BundleNamingStyle.NoHash;
                 defaultRemoteSettings.stripDownloadOptions = false;
 #else
@@ -1736,6 +1831,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultLocalSettings.useAssetBundleCrc = false;
                 defaultLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultLocalSettings.bundleNaming = BundleNamingStyle.AppendHash;
                 defaultLocalSettings.stripDownloadOptions = true;
 
@@ -1744,6 +1840,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 defaultRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 defaultRemoteSettings.useAssetBundleCrc = true;
                 defaultRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                defaultRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 defaultRemoteSettings.stripDownloadOptions = false;
 #endif
                 defaultSettings[DefaultSchemaSettingsBuildTargetGroup.Default] = new DefaultSchemaSettings[2] { defaultLocalSettings, defaultRemoteSettings };
@@ -1757,6 +1854,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 windowsLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 windowsLocalSettings.useAssetBundleCrc = false;
                 windowsLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                windowsLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 windowsLocalSettings.bundleNaming = BundleNamingStyle.OnlyHash; // help avoid max path limit
                 windowsLocalSettings.stripDownloadOptions = true;
 
@@ -1766,6 +1864,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 windowsRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 windowsRemoteSettings.useAssetBundleCrc = true;
                 windowsRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                windowsRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 windowsRemoteSettings.bundleNaming = BundleNamingStyle.OnlyHash; // help avoid max path limit
                 windowsRemoteSettings.stripDownloadOptions = false;
 
@@ -1780,6 +1879,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 iOSLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 iOSLocalSettings.useAssetBundleCrc = false;
                 iOSLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                iOSLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 iOSLocalSettings.bundleNaming = BundleNamingStyle.AppendHash;
                 iOSLocalSettings.stripDownloadOptions = true;
 
@@ -1789,6 +1889,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 iOSRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenWhenNewVersionLoaded; // frequent content updates
                 iOSRemoteSettings.useAssetBundleCrc = true;
                 iOSRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                iOSRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 iOSRemoteSettings.bundleNaming = BundleNamingStyle.AppendHash;
                 iOSRemoteSettings.stripDownloadOptions = false;
 
@@ -1803,6 +1904,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 androidLocalSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 androidLocalSettings.useAssetBundleCrc = false;
                 androidLocalSettings.useAssetBundleCrcForCachedBundles = false;
+                androidLocalSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 androidLocalSettings.bundleNaming = BundleNamingStyle.AppendHash;
                 androidLocalSettings.stripDownloadOptions = false;
 
@@ -1812,6 +1914,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 androidRemoteSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenWhenNewVersionLoaded; // frequent content updates
                 androidRemoteSettings.useAssetBundleCrc = true;
                 androidRemoteSettings.useAssetBundleCrcForCachedBundles = false;
+                androidRemoteSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 androidRemoteSettings.bundleNaming = BundleNamingStyle.AppendHash;
                 androidRemoteSettings.stripDownloadOptions = false;
 
@@ -1822,14 +1925,11 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
             {
                 DefaultSchemaSettings webGLSettings;
                 webGLSettings.compression = BundleCompressionMode.LZMA; // can only load bundles by web requests
-#if UNITY_2022_1_OR_NEWER
                 webGLSettings.useAssetBundleCache = false; // no bundle caching for this platform
-#else
-                webGLSettings.useAssetBundleCache = true;
-#endif
                 webGLSettings.assetBundledCacheClearBehavior = CacheClearBehavior.ClearWhenSpaceIsNeededInCache;
                 webGLSettings.useAssetBundleCrc = true;
                 webGLSettings.useAssetBundleCrcForCachedBundles = false;
+                webGLSettings.cacheProbeMode = CacheProbeMode.CachedVersions;
                 webGLSettings.bundleNaming = BundleNamingStyle.AppendHash;
                 webGLSettings.stripDownloadOptions = false;
 
@@ -1865,14 +1965,9 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
 
         internal bool BuildTargetSupportsBundleCaching(BuildTarget buildTarget)
         {
-#if UNITY_2022_1_OR_NEWER
             return buildTarget != BuildTarget.WebGL &&
                 buildTarget != BuildTarget.PS4 &&
                 buildTarget != BuildTarget.Switch;
-#else
-            return buildTarget != BuildTarget.PS4 &&
-                buildTarget != BuildTarget.Switch;
-#endif
         }
 
         internal enum DefaultSettingsTarget
@@ -1902,7 +1997,7 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 var loadPathName = m_LoadPath.GetName(Group.Settings);
                 if (loadPathName.Equals(AddressableAssetSettings.kRemoteLoadPath))
                 {
-                    return m_DefaultSettings[targetGroup][(int) DefaultSettingsTarget.Remote];
+                    return m_DefaultSettings[targetGroup][(int)DefaultSettingsTarget.Remote];
                 }
 
                 if (loadPathName.Equals(AddressableAssetSettings.kLocalLoadPath))
@@ -1926,6 +2021,23 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                        loadPathName.Equals(AddressableAssetSettings.kLocalLoadPath);
             }
             return false;
+        }
+
+        void SetPathPairOption(BundledAssetGroupSchema src, BundledAssetGroupSchema dst)
+        {
+            if (dst.m_BuildPath.Id != src.BuildPath.Id)
+                dst.m_BuildPath.Id = src.BuildPath.Id;
+
+            if (dst.m_LoadPath.Id != src.m_LoadPath.Id)
+                dst.m_LoadPath.Id = src.m_LoadPath.Id;
+
+            if (dst.m_UseCustomPaths != src.m_UseCustomPaths)
+                dst.m_UseCustomPaths = src.m_UseCustomPaths;
+
+            if (dst.SelectedPathPairIndex != src.SelectedPathPairIndex)
+                dst.SelectedPathPairIndex = src.SelectedPathPairIndex;
+
+            dst.SetDirty(true);
         }
     }
 }

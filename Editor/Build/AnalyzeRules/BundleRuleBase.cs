@@ -224,7 +224,7 @@ namespace UnityEditor.AddressableAssets.Build.AnalyzeRules
                     }
                 }
                 else
-                    dependencies = AssetDatabase.GetDependencies(path);
+                    dependencies = GetPlayerDependenciesForAssetPath(path);
 
                 if (!m_ResourcesToDependencies.ContainsKey(path))
                     m_ResourcesToDependencies.Add(path, new List<GUID>(dependencies.Length));
@@ -240,6 +240,29 @@ namespace UnityEditor.AddressableAssets.Build.AnalyzeRules
             }
 
             EditorUtility.ClearProgressBar();
+        }
+
+        internal static string[] GetPlayerDependenciesForAssetPath(string path)
+        {
+            string normalizedPath = path.Replace('\\', '/');
+            GUID guid = new GUID(AssetDatabase.AssetPathToGUID(normalizedPath));
+            if (guid.Empty())
+                return AssetDatabase.GetDependencies(path);
+
+            BuildTarget target = EditorUserBuildSettings.activeBuildTarget;
+            ObjectIdentifier[] includedObjects = ContentBuildInterface.GetPlayerObjectIdentifiersInAsset(guid, target);
+            if (includedObjects == null || includedObjects.Length == 0)
+                return AssetDatabase.GetDependencies(path);
+
+            HashSet<string> dependencyPaths = new HashSet<string> {normalizedPath};
+            foreach (ObjectIdentifier objectId in ContentBuildInterface.GetPlayerDependenciesForObjects(includedObjects, target, null))
+            {
+                string dependencyPath = AssetDatabase.GUIDToAssetPath(objectId.guid.ToString());
+                if (!string.IsNullOrEmpty(dependencyPath))
+                    dependencyPaths.Add(dependencyPath);
+            }
+
+            return dependencyPaths.ToArray();
         }
 
         /// <summary>
@@ -319,7 +342,7 @@ namespace UnityEditor.AddressableAssets.Build.AnalyzeRules
                 }
 
                 var schema = group.GetSchema<BundledAssetGroupSchema>();
-                if (schema != null && schema.IncludeInBuild)
+                if (schema != null && group.IncludeInBuild && schema.IsEnabled && schema.CanEnableSchema() == "")
                 {
                     List<AssetBundleBuild> bundleInputDefinitions = new List<AssetBundleBuild>();
                     m_AssetEntries.AddRange(BuildScriptPackedMode.PrepGroupBundlePacking(group, bundleInputDefinitions, schema));
@@ -686,6 +709,11 @@ namespace UnityEditor.AddressableAssets.Build.AnalyzeRules
         public override void FixIssues(AddressableAssetSettings settings)
         {
             //Do nothing.  There's nothing to fix.
+        }
+
+        /// <inheritdoc />
+        public override void FixSelectedResults(AddressableAssetSettings settings, IReadOnlyCollection<string> selectedResultNames)
+        {
         }
     }
 }

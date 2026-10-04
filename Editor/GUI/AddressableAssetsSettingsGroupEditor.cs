@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEditor.AddressableAssets.Build;
+using UnityEditor.AddressableAssets.Build.DataBuilders;
 using UnityEditor.AddressableAssets.GUI.Adapters;
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.Build.Pipeline.Utilities;
@@ -10,7 +11,7 @@ using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.ResourceManagement.Util;
 using UnityEngine.Serialization;
-#if (ENABLE_CCD && UNITY_2019_4_OR_NEWER)
+#if (ENABLE_CCD)
 using System.Threading.Tasks;
 using static UnityEditor.AddressableAssets.Build.CcdBuildEvents;
 #endif
@@ -109,6 +110,10 @@ namespace UnityEditor.AddressableAssets.GUI
 
         const int k_SplitterWidth = 3;
 
+#if ENABLE_CONTENT_DIRECTORIES
+        const float k_BannerHeight = 28f;
+        const float k_BannerBackgroundOverdraw = 2f;
+#endif
 
         public AddressableAssetsSettingsGroupEditor(AddressableAssetsWindow w)
         {
@@ -222,6 +227,9 @@ namespace UnityEditor.AddressableAssets.GUI
                 case AddressableAssetSettings.ModificationEvent.GroupMoved:
                 case AddressableAssetSettings.ModificationEvent.EntryModified:
                 case AddressableAssetSettings.ModificationEvent.BatchModification:
+                case AddressableAssetSettings.ModificationEvent.GroupSchemaAdded:
+                case AddressableAssetSettings.ModificationEvent.GroupSchemaRemoved:
+                case AddressableAssetSettings.ModificationEvent.GroupSchemaModified:
                     // the reload does a new sort
                     m_EntryTree?.Reload();
 
@@ -254,7 +262,7 @@ namespace UnityEditor.AddressableAssets.GUI
         GUIStyle m_ButtonStyle;
 
         [NonSerialized]
-        Texture2D m_CogIcon;
+        Texture2D m_MenuIcon;
 
         void TopToolbar(Rect toolbarPos)
         {
@@ -281,8 +289,8 @@ namespace UnityEditor.AddressableAssets.GUI
 
             if (m_ButtonStyle == null)
                 m_ButtonStyle = GetStyle("ToolbarButton");
-            if (m_CogIcon == null)
-                m_CogIcon = EditorGUIUtility.FindTexture("_Popup");
+            if (m_MenuIcon == null)
+                m_MenuIcon = EditorGUIUtility.FindTexture("_Menu");
 
 
             GUILayout.BeginArea(new Rect(0, 0, toolbarPos.width, k_SearchHeight));
@@ -393,11 +401,17 @@ namespace UnityEditor.AddressableAssets.GUI
                     {
                         if (buildOption.SelectableBuildScript)
                         {
+                            // Hide BuildScriptPackedMode so BuildScriptSchemaDriven is the default, but only when the
+                            // schema-driven script actually exists; otherwise keep packed visible so the menu still has
+                            // a usable build script instead of showing "No Build Script Available".
+                            bool schemaDrivenBuilderExists = SchemaDrivenBuilderExists(settings);
                             bool addressablesPlayerBuildResultBuilderExists = false;
                             for (int i = 0; i < settings.DataBuilders.Count; i++)
                             {
                                 var dataBuilder = settings.GetDataBuilder(i);
-                                if (dataBuilder != null && dataBuilder.CanBuildData<AddressablesPlayerBuildResult>())
+
+                                if (dataBuilder != null && dataBuilder.CanBuildData<AddressablesPlayerBuildResult>()
+                                    && (!schemaDrivenBuilderExists || dataBuilder.GetType() != typeof(BuildScriptPackedMode)))
                                 {
                                     addressablesPlayerBuildResultBuilderExists = true;
                                     BuildMenuContext context = new BuildMenuContext()
@@ -407,7 +421,8 @@ namespace UnityEditor.AddressableAssets.GUI
                                         Settings = settings
                                     };
 
-                                    genericDropdownMenu.AddItem(new GUIContent(buildOption.BuildMenuPath + "/" + dataBuilder.Name), false, OnBuildAddressables, context);
+                                    string displayName = dataBuilder.Name;
+                                    genericDropdownMenu.AddItem(new GUIContent(buildOption.BuildMenuPath + "/" + displayName), false, OnBuildAddressables, context);
                                 }
                             }
 
@@ -433,10 +448,14 @@ namespace UnityEditor.AddressableAssets.GUI
                     }
 
                     genericDropdownMenu.AddItem(new GUIContent("Clear Build Cache/Build Pipeline Cache"), false, OnCleanSBP, true);
+#if ENABLE_CONTENT_DIRECTORIES
+                    genericDropdownMenu.AddItem(new GUIContent("Clear Build Cache/Content Directory Cache"), false, OnCleanContentDirectory, true);
+#endif
+                    genericDropdownMenu.AddItem(new GUIContent("Clear Build Cache/Shader Cache"), false, OnCleanShaderCache, true);
                     genericDropdownMenu.DropDown(rBuild);
                 }
 
-#if (ENABLE_CCD && UNITY_2019_4_OR_NEWER)
+#if (ENABLE_CCD)
                 var guiBuildToCcd = new GUIContent("Build to CCD", "Options for building Addressable Assets");
                 Rect rBuildToCcd = GUILayoutUtility.GetRect(guiBuildToCcd, EditorStyles.toolbarDropDown);
                 if (EditorGUI.DropdownButton(rBuildToCcd, guiBuildToCcd, FocusType.Passive, EditorStyles.toolbarDropDown))
@@ -448,11 +467,16 @@ namespace UnityEditor.AddressableAssets.GUI
                     {
                         if (buildOption.SelectableBuildScript)
                         {
+                            // Hide BuildScriptPackedMode so BuildScriptSchemaDriven is the default, but only when the
+                            // schema-driven script actually exists; otherwise keep packed visible so the menu still has
+                            // a usable build script instead of showing "No Build Script Available".
+                            bool schemaDrivenBuilderExists = SchemaDrivenBuilderExists(settings);
                             bool addressablesPlayerBuildResultBuilderExists = false;
                             for (int i = 0; i < settings.DataBuilders.Count; i++)
                             {
                                 var dataBuilder = settings.GetDataBuilder(i);
-                                if (dataBuilder != null && dataBuilder.CanBuildData<AddressablesPlayerBuildResult>())
+                                if (dataBuilder != null && dataBuilder.CanBuildData<AddressablesPlayerBuildResult>()
+                                    && (!schemaDrivenBuilderExists || dataBuilder.GetType() != typeof(BuildScriptPackedMode)))
                                 {
                                     addressablesPlayerBuildResultBuilderExists = true;
                                     BuildMenuContext context = new BuildMenuContext()
@@ -462,7 +486,8 @@ namespace UnityEditor.AddressableAssets.GUI
                                         Settings = settings
                                     };
 
-                                    genericDropdownMenu.AddItem(new GUIContent(dataBuilder.Name), false, OnBuildCcd, context);
+                                    string displayName = dataBuilder.Name;
+                                    genericDropdownMenu.AddItem(new GUIContent(displayName), false, OnBuildCcd, context);
                                 }
                             }
 
@@ -542,6 +567,18 @@ namespace UnityEditor.AddressableAssets.GUI
             return displayMenus;
         }
 
+        // Returns true if the settings contain a BuildScriptSchemaDriven data builder. The build menus hide
+        // BuildScriptPackedMode in favor of the schema-driven script, but only when it is actually present.
+        static bool SchemaDrivenBuilderExists(AddressableAssetSettings settings)
+        {
+            for (int i = 0; i < settings.DataBuilders.Count; i++)
+            {
+                if (settings.GetDataBuilder(i) is BuildScriptSchemaDriven)
+                    return true;
+            }
+            return false;
+        }
+
 
 
         private static void OnBuildAddressables(object ctx)
@@ -591,7 +628,7 @@ namespace UnityEditor.AddressableAssets.GUI
             return result;
         }
 
-#if (ENABLE_CCD && UNITY_2019_4_OR_NEWER)
+#if (ENABLE_CCD)
         private static void OnBuildCcd(object ctx)
         {
             BuildMenuContext buildAddressablesContext = (BuildMenuContext)ctx;
@@ -697,10 +734,32 @@ namespace UnityEditor.AddressableAssets.GUI
 
         void OnCleanAll()
         {
-            if (!EditorUtility.DisplayDialog("Clear build cache", "Do you really want to clear your entire build cache and runtime data cache?", "Yes", "No"))
+            string buildPath = Path.Combine(Addressables.LibraryPath, "aa");
+            string message = $"Do you really want to clear your entire build cache and runtime data cache?\r\nThis will also delete all build cache, runtime cache and the AssetBundles in {buildPath} to ensure invalid AssetBundles don't end up in your Player build.";
+
+            if (!EditorUtility.DisplayDialog("Delete Cache", message, "Delete", "Cancel"))
                 return;
+
+            // Delete the default build path directory to remove all built bundles
+            if (Directory.Exists(buildPath))
+            {
+                try
+                {
+                    Directory.Delete(buildPath, true);
+                    Debug.Log($"Deleted bundles from {buildPath}");
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"Failed to delete {buildPath}: {e.Message}");
+                }
+            }
+
             OnCleanAddressables(null);
             OnCleanSBP(false);
+#if ENABLE_CONTENT_DIRECTORIES
+            OnCleanContentDirectory(false);
+#endif
+            OnCleanShaderCache(false);
         }
 
         void OnCleanAddressables(object builder)
@@ -711,6 +770,37 @@ namespace UnityEditor.AddressableAssets.GUI
         void OnCleanSBP(object prompt)
         {
             BuildCache.PurgeCache((bool) prompt);
+        }
+
+#if ENABLE_CONTENT_DIRECTORIES
+        void OnCleanContentDirectory(object prompt)
+        {
+            if ((bool) prompt)
+            {
+                if (!EditorUtility.DisplayDialog("Purge Content Directory Cache", "Do you really want to purge your entire content directory build cache?", "Yes", "No"))
+                    return;
+            }
+            BuildPipeline.CleanBuildCache();
+            if (AssetDatabase.AssetPathExists("Library/BuildInstructions/ContentDirectoryRootAssets"))
+            {
+                AssetDatabase.DeleteAsset("Library/BuildInstructions/ContentDirectoryRootAssets");
+
+            }
+        }
+#endif
+
+        void OnCleanShaderCache(object prompt)
+        {
+            if ((bool) prompt)
+            {
+                if (!EditorUtility.DisplayDialog("Purge Shader Cache", "Do you really want to purge your entire shader cache?", "Yes", "No"))
+                    return;
+            }
+
+            if (Directory.Exists("Library/ShaderCache"))
+            {
+                Directory.Delete("Library/ShaderCache", true);
+            }
         }
 
         void OnPrepareUpdate()
@@ -749,7 +839,7 @@ namespace UnityEditor.AddressableAssets.GUI
             ContentUpdatePreviewWindow.PrepareForContentUpdate(AddressableAssetSettingsDefaultObject.Settings, path);
         }
 
-#if (ENABLE_CCD && UNITY_2019_4_OR_NEWER)
+#if (ENABLE_CCD)
         async void OnBuildAndRelease()
         {
             await AddressableAssetSettings.BuildAndReleasePlayerContent();
@@ -865,9 +955,26 @@ namespace UnityEditor.AddressableAssets.GUI
             HandleVerticalResize(pos);
             var inRectY = pos.height;
             var searchRect = new Rect(pos.xMin, pos.yMin, pos.width, k_SearchHeight);
-            var treeRect = new Rect(pos.xMin, pos.yMin + k_SearchHeight, pos.width, inRectY - k_SearchHeight);
+
+            float bannerHeight = 0f;
+#if ENABLE_CONTENT_DIRECTORIES
+            if (!ProjectConfigData.UserHasSeenContentDirectoryAnnouncement)
+                bannerHeight = k_BannerHeight;
+#endif
+
+            var bannerRect = new Rect(pos.xMin, pos.yMin + k_SearchHeight, pos.width, bannerHeight);
+            var treeRect = new Rect(pos.xMin, pos.yMin + k_SearchHeight + bannerHeight, pos.width, inRectY - k_SearchHeight - bannerHeight);
 
             TopToolbar(searchRect);
+
+#if ENABLE_CONTENT_DIRECTORIES
+            if (DrawContentDirectoryBanner(bannerRect))
+            {
+                if (window != null)
+                    window.Repaint();
+            }
+#endif
+
             m_EntryTree.OnGUI(treeRect);
             return m_ResizingVerticalSplitter;
         }
@@ -934,5 +1041,108 @@ namespace UnityEditor.AddressableAssets.GUI
             else
                 m_VerticalSplitterPercent = Mathf.Clamp(m_VerticalSplitterPercent, 0.20f, 0.90f);
         }
+
+#if ENABLE_CONTENT_DIRECTORIES
+        bool DrawContentDirectoryBanner(Rect rect)
+        {
+            if (ProjectConfigData.UserHasSeenContentDirectoryAnnouncement || rect.height <= 0)
+                return false;
+
+            bool needsRepaint = false;
+
+            //Using EditorStyles.helpbox.Draw ensure that a skin-appropriate background is drawn so the banner matches the active editor theme.
+            //The background is drawn slightly past the bottom of the banner so the style's transparent edge is covered by the tree view below it instead of showing as a gap.
+            if (Event.current.type == EventType.Repaint)
+                EditorStyles.helpBox.Draw(new Rect(rect.x, rect.y, rect.width, rect.height + k_BannerBackgroundOverdraw), GUIContent.none, 0);
+
+            // Add padding
+            Rect contentRect = new Rect(rect.x + 8, rect.y, rect.width - 16, rect.height);
+
+            // Close button on the right using built-in close icon
+            float closeButtonSize = 14f;
+            Rect closeButtonRect = new Rect(contentRect.xMax - closeButtonSize, contentRect.y + (contentRect.height - closeButtonSize) / 2, closeButtonSize, closeButtonSize);
+
+            // Draw hover background
+            if (closeButtonRect.Contains(Event.current.mousePosition))
+            {
+                EditorGUI.DrawRect(closeButtonRect, new Color(0.5f, 0.5f, 0.5f, 0.3f));
+            }
+
+            string crossIconName = EditorGUIUtility.isProSkin ? "d_Close" : "Close";
+            GUIContent closeIcon = EditorGUIUtility.IconContent(crossIconName);
+            GUIStyle closeStyle = GUIStyle.none;
+
+            EditorGUIUtility.AddCursorRect(closeButtonRect, MouseCursor.Link);
+            if (UnityEngine.GUI.Button(closeButtonRect, closeIcon, closeStyle))
+            {
+                ProjectConfigData.UserHasSeenContentDirectoryAnnouncement = true;
+                needsRepaint = true;
+            }
+
+            // Text area
+            Rect textRect = new Rect(contentRect.x, contentRect.y, contentRect.width - closeButtonSize - 4, contentRect.height);
+
+            GUIStyle labelStyle = new GUIStyle(EditorStyles.label);
+            labelStyle.alignment = TextAnchor.MiddleLeft;
+            labelStyle.wordWrap = false;
+
+            GUIStyle linkStyle = new GUIStyle(EditorStyles.linkLabel);
+            linkStyle.alignment = TextAnchor.MiddleLeft;
+            linkStyle.wordWrap = false;
+            linkStyle.font = labelStyle.font;
+            linkStyle.fontSize = labelStyle.fontSize;
+            linkStyle.fontStyle = labelStyle.fontStyle;
+            linkStyle.padding = labelStyle.padding;
+            linkStyle.contentOffset = labelStyle.contentOffset;
+            linkStyle.fixedHeight = 0f;
+
+            string message = "For the most up to date way of managing local content, use the Content Directory schema.";
+
+            GUIContent linkContent = new GUIContent("Read more...");
+            float linkWidth = linkStyle.CalcSize(linkContent).x;
+            float messageMaxWidth = Mathf.Max(0f, textRect.width - linkWidth);
+
+            Vector2 messageSize = labelStyle.CalcSize(new GUIContent(message));
+
+            // Truncate if needed
+            if (messageSize.x > messageMaxWidth)
+            {
+                message = TruncateTextWithEllipsis(message, messageMaxWidth, labelStyle);
+                messageSize = labelStyle.CalcSize(new GUIContent(message));
+            }
+
+            float messageWidth = Mathf.Min(messageSize.x, messageMaxWidth);
+            UnityEngine.GUI.Label(new Rect(textRect.x, textRect.y, messageWidth, textRect.height), message, labelStyle);
+
+            Rect linkRect = new Rect(textRect.x + messageWidth, textRect.y, linkWidth, textRect.height);
+            EditorGUIUtility.AddCursorRect(linkRect, MouseCursor.Link);
+            if (UnityEngine.GUI.Button(linkRect, linkContent, linkStyle))
+                Application.OpenURL(AddressableAssetUtility.GenerateContentDirectoriesDocsURL());
+
+            return needsRepaint;
+        }
+
+        string TruncateTextWithEllipsis(string text, float maxWidth, GUIStyle style)
+        {
+            if (string.IsNullOrEmpty(text))
+                return text;
+
+            string ellipsis = "...";
+            float ellipsisWidth = style.CalcSize(new GUIContent(ellipsis)).x;
+
+            for (int i = text.Length - 1; i >= 0; i--)
+            {
+                string truncated = text.Substring(0, i);
+                float width = style.CalcSize(new GUIContent(truncated)).x;
+
+                if (width + ellipsisWidth <= maxWidth)
+                {
+                    return truncated + ellipsis;
+                }
+            }
+
+            return ellipsis;
+        }
+#endif
     }
 }

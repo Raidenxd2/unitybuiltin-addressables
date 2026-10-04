@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using NUnit.Framework;
 using UnityEditor.AddressableAssets.Build;
+using UnityEditor.AddressableAssets.Build.CatalogBuilders;
 using UnityEditor.AddressableAssets.Build.DataBuilders;
+using UnityEngine.AddressableAssets.ResourceProviders;
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEngine;
@@ -90,24 +92,6 @@ namespace UnityEditor.AddressableAssets.Tests
             Assert.AreEqual(result, 20);
         }
 
-#if !UNITY_2020_3_OR_NEWER
-        [Test]
-        public void Hash128AppendExtensionTests()
-        {
-            var h1 = new Hash128(2351235, 3457345734, 457845683, 213451235);
-            var h2 = h1;
-            h2.Append("string");
-            Assert.AreNotEqual(h1, h2);
-            h2 = h1;
-            h2.Append(462346);
-            Assert.AreNotEqual(h1, h2);
-            h2 = h1;
-            Hash128 v = new Hash128(45346, 4568234, 213, 35454);
-            h2.Append(ref v);
-            Assert.AreNotEqual(h1, h2);
-        }
-
-#endif
         [Test]
         public void SettingsCache_CacheClearedOnSettingsChanged()
         {
@@ -134,14 +118,14 @@ namespace UnityEditor.AddressableAssets.Tests
         {
             string[] symbols = Array.Empty<string>();
             string[] newSymbols = AddressableAssetSettings.UpdateScriptingDefineSymbols(symbols, true);
-            string[] expected = new string[] { "ENABLE_JSON_CATALOG" };
+            string[] expected = new string[] { AddressableAssetSettings.k_EnableJsonCatalogSymbol };
             Assert.AreEqual(expected, newSymbols, "UpdateScriptingDefineSymbols fails in simple enable case.");
         }
 
         [Test]
         public void UpdateScriptingDefineSymbols_DisableJsonCatalog_SimpleCase()
         {
-            string[] symbols = new string[] { "ENABLE_JSON_CATALOG" };
+            string[] symbols = new string[] { AddressableAssetSettings.k_EnableJsonCatalogSymbol };
             string[] newSymbols = AddressableAssetSettings.UpdateScriptingDefineSymbols(symbols, false);
             string[] expected = new string[] { };
             Assert.AreEqual(expected, newSymbols, "UpdateScriptingDefineSymbols fails in simple disable case.");
@@ -150,7 +134,7 @@ namespace UnityEditor.AddressableAssets.Tests
         [Test]
         public void UpdateScriptingDefineSymbols_EnableJsonCatalog_ReturnsNullinTrivialEnableCase()
         {
-            string[] symbols = new string[] { "ENABLE_JSON_CATALOG" };
+            string[] symbols = new string[] { AddressableAssetSettings.k_EnableJsonCatalogSymbol };
             string[] newSymbols = AddressableAssetSettings.UpdateScriptingDefineSymbols(symbols, true);
             string[] expected = null;
             Assert.AreEqual(expected, newSymbols, "UpdateScriptingDefineSymbols fails in trivial enable case.");
@@ -170,14 +154,14 @@ namespace UnityEditor.AddressableAssets.Tests
         {
             string[] symbols = new string[] {"Test1", "Test2", "Test3", "Test4", "Test5", "ENABLE_NOTJSON_CATALOG", "ANN%$Y^NG_V#%UE"};
             string[] newSymbols = AddressableAssetSettings.UpdateScriptingDefineSymbols(symbols, true);
-            string[] expected = new string[] {"ENABLE_JSON_CATALOG", "Test1", "Test2", "Test3", "Test4", "Test5", "ENABLE_NOTJSON_CATALOG", "ANN%$Y^NG_V#%UE"};
+            string[] expected = new string[] {AddressableAssetSettings.k_EnableJsonCatalogSymbol, "Test1", "Test2", "Test3", "Test4", "Test5", "ENABLE_NOTJSON_CATALOG", "ANN%$Y^NG_V#%UE"};
             Assert.AreEqual(expected, newSymbols, "UpdateScriptingDefineSymbols fails in complex enable case.");
         }
 
         [Test]
         public void UpdateScriptingDefineSymbols_EnableJsonCatalog_SucceedsInComplexDisableCase()
         {
-            string[] symbols = new string[] {"Test1", "Test2", "Test3", "Test4", "ENABLE_KINDAJSON_CATALOG", "ENABLE_JSON_CATALOG", "Test5", "ENABLE_NOTJSON_CATALOG", "ANN%$Y^NG_V#%UE"};
+            string[] symbols = new string[] {"Test1", "Test2", "Test3", "Test4", "ENABLE_KINDAJSON_CATALOG", AddressableAssetSettings.k_EnableJsonCatalogSymbol, "Test5", "ENABLE_NOTJSON_CATALOG", "ANN%$Y^NG_V#%UE"};
             string[] newSymbols = AddressableAssetSettings.UpdateScriptingDefineSymbols(symbols, false);
             string[] expected = new string[] {"Test1", "Test2", "Test3", "Test4", "ENABLE_KINDAJSON_CATALOG", "Test5", "ENABLE_NOTJSON_CATALOG", "ANN%$Y^NG_V#%UE"};
             Assert.AreEqual(expected, newSymbols, "UpdateScriptingDefineSymbols fails in complex disable case.");
@@ -201,6 +185,16 @@ namespace UnityEditor.AddressableAssets.Tests
         public void HasDefaultVersionOverride()
         {
             Assert.AreEqual(kDefaultPlayerVersion, Settings.OverridePlayerVersion);
+        }
+
+        [Test]
+        public void CurrentHash_IsNotSerialized()
+        {
+            // The settings hash is recomputed lazily and must never be written to the settings asset -
+            // persisting it caused the on-disk hash to flip between a real value and zero as it was
+            // invalidated/recalculated, creating spurious source control diffs (CBD-2000).
+            var serializedSettings = new UnityEditor.SerializedObject(Settings);
+            Assert.IsNull(serializedSettings.FindProperty("m_currentHash"));
         }
 
         [Test]
@@ -471,6 +465,15 @@ namespace UnityEditor.AddressableAssets.Tests
         }
 
         [Test]
+        public void FindAssetEntry_NullOrEmptyGuid_ReturnsNull()
+        {
+            Assert.IsNull(Settings.FindAssetEntry(null));
+            Assert.IsNull(Settings.FindAssetEntry(null, true));
+            Assert.IsNull(Settings.FindAssetEntry(""));
+            Assert.IsNull(Settings.FindAssetEntry("", true));
+        }
+
+        [Test]
         public void FindAssetEntry_IncludeImplicitIsTrue_ReturnsImplicitEntries()
         {
             var folderPath = GetAssetPath("aaFolder");
@@ -632,6 +635,27 @@ namespace UnityEditor.AddressableAssets.Tests
             Settings.ActivePlayerDataBuilderIndex = Settings.ActivePlayerDataBuilderIndex + 1;
             var dc = EditorUtility.GetDirtyCount(Settings);
             Assert.AreEqual(prevDC + 1, dc);
+        }
+
+        [Test(Description = "UUM-146979: ProfileValueReference.Id is treated differently when null or empty string")]
+        public void RemoteCatalogBuildPath_WhenIdIsEmptyString_ReResolvesPathVariableInsteadOfStayingEmpty()
+        {
+            ProfileValueReference prevRemoteCatalogBuildPath = Settings.RemoteCatalogBuildPath;
+            try
+            {
+                var staleRemoteCatalogBuildPath = new ProfileValueReference();
+                staleRemoteCatalogBuildPath.Id = string.Empty;
+                Settings.RemoteCatalogBuildPath = staleRemoteCatalogBuildPath;
+
+                ProfileValueReference resolved = Settings.RemoteCatalogBuildPath;
+
+                Assert.AreEqual(Settings.profileSettings.GetProfileDataByName(AddressableAssetSettings.kRemoteBuildPath).Id, resolved.Id);
+                Assert.IsFalse(string.IsNullOrEmpty(resolved.GetValue(Settings)));
+            }
+            finally
+            {
+                Settings.RemoteCatalogBuildPath = prevRemoteCatalogBuildPath;
+            }
         }
 
         [Test]
@@ -860,6 +884,19 @@ namespace UnityEditor.AddressableAssets.Tests
             Assert.IsFalse(Settings.AddGroupTemplateObject(groupTemplateTest as IGroupTemplate));
             Assert.AreEqual(currentGroupTemplateCount, Settings.GroupTemplateObjects.Count);
             Assert.AreSame(unchangedGroupTemplate, Settings.GetGroupTemplateObject(Settings.GroupTemplateObjects.Count - 1));
+        }
+
+        [Test]
+        public void AddressableAssetSettings_AddGroupTemplateObject_DoesNotAddDuplicateWhenAlreadyInList()
+        {
+            var template = ScriptableObject.CreateInstance<AddressableAssetGroupTemplate>();
+            var firstAdd = Settings.AddGroupTemplateObject(template);
+            Assert.IsTrue(firstAdd, "First add should succeed");
+            int count = Settings.GroupTemplateObjects.Count;
+
+            var secondAdd = Settings.AddGroupTemplateObject(template);
+            Assert.IsFalse(secondAdd, "Second add returns false (already present)");
+            Assert.AreEqual(count, Settings.GroupTemplateObjects.Count, "Count unchanged when adding same reference again");
         }
 
         [Test]
@@ -1612,5 +1649,206 @@ namespace UnityEditor.AddressableAssets.Tests
             }
             Assert.AreEqual(expectedBundledAssetProviderValue, group.GetSchema<BundledAssetGroupSchema>().BundledAssetProviderType, "The value of BundledAssetProviderType should be unchanged.");
         }
+
+#if ENABLE_CONTENT_DIRECTORIES
+        [Test]
+        public void CanSetGroupSettings_GroupAssetEntryProviderType()
+        {
+            var settings = AddressableAssetSettings.Create(ConfigFolder, k_TestConfigName + "_GlobalSettingsTest", false, false);
+            var group = settings.CreateGroup("GlobalSettingsTest", false, false, false, null, typeof(ContentDirectoryGroupSchema));
+            group.GetSchema<ContentDirectoryGroupSchema>().GroupAssetEntryProviderType = new SerializedType() { Value = typeof(ResourceProviderBase) };
+
+            var expectedGroupAssetEntryProviderValue = new SerializedType() { Value = typeof(NativeContentAssetEntryProvider) };
+            settings.GroupAssetEntryProviderType = expectedGroupAssetEntryProviderValue;
+            settings.UpdateGroupAssetEntryProviderType();
+            Assert.AreEqual(expectedGroupAssetEntryProviderValue, group.GetSchema<ContentDirectoryGroupSchema>().GroupAssetEntryProviderType, "The value of GroupAssetEntryProviderType should be changed.");
+        }
+
+        [Test]
+        public void CanSetGroupSettings_UpdateGroupAssetEntryProviderType()
+        {
+            var settings = AddressableAssetSettings.Create(ConfigFolder, k_TestConfigName + "_GlobalSettingsTest", false, false);
+            var group = settings.CreateGroup("GlobalSettingsTest", false, false, false, null, typeof(ContentDirectoryGroupSchema));
+            group.GetSchema<ContentDirectoryGroupSchema>().GroupAssetEntryProviderType = new SerializedType() { Value = typeof(ResourceProviderBase) };
+
+            var expectedGroupAssetEntryProviderValue = new SerializedType() { Value = typeof(NativeContentAssetEntryProvider) };
+            settings.m_GroupAssetEntryProviderType = expectedGroupAssetEntryProviderValue;
+            settings.UpdateGroupAssetEntryProviderType();
+            Assert.AreEqual(expectedGroupAssetEntryProviderValue, group.GetSchema<ContentDirectoryGroupSchema>().GroupAssetEntryProviderType, "The value of GroupAssetEntryProviderType should be changed.");
+        }
+#endif
+
+        [Test]
+        public void CatalogFormatMigration_SetsBinaryByDefault()
+        {
+            Settings.m_CatalogFormatMigrated = false;
+            Settings.EnableJsonCatalog = false;
+            AddressableAssetSettings.RunMigrationSteps(Settings);
+            Assert.IsTrue(Settings.CatalogFormatMigrated, "Migration flag should be set after running migration steps.");
+#if ENABLE_JSON_CATALOG
+            Assert.IsTrue(Settings.EnableJsonCatalog, "EnableJsonCatalog should be true after migration when the ENABLE_JSON_CATALOG define is set.");
+#else
+            Assert.IsFalse(Settings.EnableJsonCatalog, "EnableJsonCatalog should remain false when the setting was not previously enabled.");
+#endif
+        }
+
+        [Test]
+        public void CatalogFormatMigration_IsIdempotent()
+        {
+            Settings.m_CatalogFormatMigrated = false;
+            Settings.EnableJsonCatalog = true;
+            AddressableAssetSettings.RunMigrationSteps(Settings);
+            Assert.IsTrue(Settings.CatalogFormatMigrated);
+            bool afterFirst = Settings.EnableJsonCatalog;
+
+            AddressableAssetSettings.RunMigrationSteps(Settings);
+            Assert.AreEqual(afterFirst, Settings.EnableJsonCatalog, "Second migration run must not change the setting.");
+        }
+
+        [Test]
+        public void CreateCatalogBuilder_ReturnsJsonBuilder_WhenEnableJsonCatalogTrue()
+        {
+            Settings.EnableJsonCatalog = true;
+            var script = ScriptableObject.CreateInstance<BuildScriptSchemaDriven>();
+            var builder = script.CreateCatalogBuilderForTest(Settings);
+            Assert.IsInstanceOf<JsonCatalogBuilder>(builder, "Expected JsonCatalogBuilder when EnableJsonCatalog is true.");
+        }
+
+        [Test]
+        public void CreateCatalogBuilder_ReturnsBinaryBuilder_WhenEnableJsonCatalogFalse()
+        {
+            Settings.EnableJsonCatalog = false;
+            var script = ScriptableObject.CreateInstance<BuildScriptSchemaDriven>();
+            var builder = script.CreateCatalogBuilderForTest(Settings);
+            Assert.IsInstanceOf<BinaryCatalogBuilder>(builder, "Expected BinaryCatalogBuilder when EnableJsonCatalog is false.");
+        }
+
+        // ---- CatalogProviderType / EnableJsonCatalog shim ----
+
+        [Test]
+        public void CatalogProviderType_DefaultsToBinaryProvider()
+        {
+            var settings = ScriptableObject.CreateInstance<AddressableAssetSettings>();
+            Assert.AreEqual(typeof(BinaryCatalogProvider), settings.CatalogProviderType,
+                "Fresh settings should default to BinaryCatalogProvider.");
+            ScriptableObject.DestroyImmediate(settings);
+        }
+
+        [Test]
+        public void EnableJsonCatalog_Shim_SetTrue_SetsJsonProvider()
+        {
+            Settings.EnableJsonCatalog = true;
+            Assert.AreEqual(typeof(JsonCatalogProvider), Settings.CatalogProviderType,
+                "Setting EnableJsonCatalog=true should switch CatalogProviderType to JsonCatalogProvider.");
+        }
+
+        [Test]
+        public void EnableJsonCatalog_Shim_SetFalse_SetsBinaryProvider()
+        {
+            Settings.EnableJsonCatalog = true;  // set to non-default first
+            Settings.EnableJsonCatalog = false;
+            Assert.AreEqual(typeof(BinaryCatalogProvider), Settings.CatalogProviderType,
+                "Setting EnableJsonCatalog=false should switch CatalogProviderType to BinaryCatalogProvider.");
+        }
+
+        [Test]
+        public void EnableJsonCatalog_Shim_Get_ReflectsProviderType()
+        {
+            Settings.CatalogProviderType = typeof(JsonCatalogProvider);
+            Assert.IsTrue(Settings.EnableJsonCatalog, "EnableJsonCatalog should be true when CatalogProviderType is Json.");
+
+            Settings.CatalogProviderType = typeof(BinaryCatalogProvider);
+            Assert.IsFalse(Settings.EnableJsonCatalog, "EnableJsonCatalog should be false when CatalogProviderType is Binary.");
+        }
+
+        // ---- BaseCatalogBuilder.CreateForProvider ----
+
+        [Test]
+        public void CreateForProvider_JsonProvider_ReturnsJsonCatalogBuilder()
+        {
+            var builder = BaseCatalogBuilder.CreateForProvider(typeof(JsonCatalogProvider));
+            Assert.IsInstanceOf<JsonCatalogBuilder>(builder);
+        }
+
+        [Test]
+        public void CreateForProvider_BinaryProvider_ReturnsBinaryCatalogBuilder()
+        {
+            var builder = BaseCatalogBuilder.CreateForProvider(typeof(BinaryCatalogProvider));
+            Assert.IsInstanceOf<BinaryCatalogBuilder>(builder);
+        }
+
+        [Test]
+        public void CreateForProvider_UnknownProvider_Throws()
+        {
+            // typeof(object) has no matching ICatalogBuilder; factory must throw.
+            Assert.Throws<InvalidOperationException>(
+                () => BaseCatalogBuilder.CreateForProvider(typeof(object)),
+                "Should throw when no builder matches the given provider type.");
+        }
+
+        // ---- RunMigrationSteps migration ----
+
+        [Test]
+        public void RunMigrationSteps_LegacyEnableJsonCatalogTrue_SetsCatalogProviderTypeToJson()
+        {
+            // Prime the legacy bool via the public setter (which keeps it in sync),
+            // then override CatalogProviderType back to Binary to simulate settings
+            // that were serialized with the old bool but have not yet been migrated.
+            Settings.EnableJsonCatalog = true;
+            Settings.CatalogProviderType = typeof(BinaryCatalogProvider);
+            Settings.m_CatalogFormatMigrated = false;
+
+            AddressableAssetSettings.RunMigrationSteps(Settings);
+
+            Assert.AreEqual(typeof(JsonCatalogProvider), Settings.CatalogProviderType,
+                "Migration should set CatalogProviderType to Json when legacy m_EnableJsonCatalog was true.");
+        }
+
+        [Test]
+        public void RunMigrationSteps_LegacyEnableJsonCatalogFalse_SetsCatalogProviderTypeToBinary()
+        {
+            // Prime the legacy bool to false (default) and simulate unmigrated state.
+            Settings.EnableJsonCatalog = false;
+            Settings.m_CatalogFormatMigrated = false;
+
+            AddressableAssetSettings.RunMigrationSteps(Settings);
+
+#if ENABLE_JSON_CATALOG
+            Assert.AreEqual(typeof(JsonCatalogProvider), Settings.CatalogProviderType,
+                "Migration should set CatalogProviderType to Json when the ENABLE_JSON_CATALOG define is set.");
+#else
+            Assert.AreEqual(typeof(BinaryCatalogProvider), Settings.CatalogProviderType,
+                "Migration should set CatalogProviderType to Binary when legacy m_EnableJsonCatalog was false.");
+#endif
+        }
+
+        // ---- GetTypes population ----
+
+        [Test]
+        public void GetTypes_ContentCatalogProvider_IncludesJsonAndBinaryProviders()
+        {
+            var types = AddressableAssetUtility.GetTypes(typeof(ContentCatalogProvider));
+            Assert.Contains(typeof(JsonCatalogProvider), types,
+                "GetTypes should include JsonCatalogProvider as a ContentCatalogProvider subclass.");
+            Assert.Contains(typeof(BinaryCatalogProvider), types,
+                "GetTypes should include BinaryCatalogProvider as a ContentCatalogProvider subclass.");
+        }
+
+        [Test]
+        public void CatalogProviderType_WhenSetToNull_ReturnsNull()
+        {
+            Settings.CatalogProviderType = null;
+            Assert.IsNull(Settings.CatalogProviderType,
+                "CatalogProviderType should return null when explicitly set — no silent fallback to Binary.");
+        }
+
+        [Test]
+        public void CreateForProvider_NullProviderType_ThrowsInvalidOperationException()
+        {
+            Assert.Throws<InvalidOperationException>(
+                () => BaseCatalogBuilder.CreateForProvider(null),
+                "Passing null to CreateForProvider should throw, causing the build to fail.");
+        }
+
     }
 }

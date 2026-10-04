@@ -15,10 +15,8 @@ using System.Text;
 using UnityEngine.Networking;
 using UnityEngine.Scripting;
 
-
 #if UNITY_EDITOR
 using UnityEditor;
-using UnityEditorInternal;
 #endif
 
 namespace UnityEngine.AddressableAssets
@@ -249,35 +247,46 @@ namespace UnityEngine.AddressableAssets
             switch (format)
             {
                 case Format.StandardMessage:
-                    return string.Format(BaseInvalidKeyMessageFormat, base.Message, Key.ToString(), Type.FullName);
+                    return string.Format(BaseInvalidKeyMessageFormat, base.Message, FormatKey(Key), Type.FullName);
 
                 case Format.MultipleTypesRequested:
-                    var e = Key as IEnumerable;
-                    string types = null;
-                    foreach (var o in e)
-                    {
-                        if (types == null)
-                            types = o.ToString();
-                        else
-                            types += ", " + o.ToString();
-                    }
-                    return string.Format(MultipleTypesMessageFormat, base.Message, types);
+                    return string.Format(MultipleTypesMessageFormat, base.Message, FormatKey(Key));
                 case Format.NoLocation:
 #if UNITY_EDITOR
                     string assetPath = AssetDatabase.GUIDToAssetPath(Key.ToString());
                     if (!string.IsNullOrEmpty(assetPath))
                     {
-                        return string.Format(EditorNoLocationMessageFormat, base.Message, Key.ToString(), assetPath);
+                        return string.Format(EditorNoLocationMessageFormat, base.Message, FormatKey(Key), assetPath);
                     }
 #endif
-                    return string.Format(NoLocationMessageFormat, base.Message, Key.ToString());// $"{base.Message} No Location found for Key={keyString}";
+                    return string.Format(NoLocationMessageFormat, base.Message, FormatKey(Key));// $"{base.Message} No Location found for Key={keyString}";
                 case Format.TypeMismatch:
-                    return string.Format(TypeMismatchMessageFormat, base.Message, Key.ToString(), Type.FullName, foundWithTypeString);
+                    return string.Format(TypeMismatchMessageFormat, base.Message, FormatKey(Key), Type.FullName, foundWithTypeString);
                 case Format.MultipleTypeMismatch:
-                    return string.Format(MultipleTypeMismatchMessageFormat, base.Message, Key.ToString(), Type.FullName, foundWithTypeString);
+                    return string.Format(MultipleTypeMismatchMessageFormat, base.Message, FormatKey(Key), Type.FullName, foundWithTypeString);
                 default:
                     throw new ArgumentOutOfRangeException(nameof(format), format, null);
             }
+        }
+
+        internal string FormatKey(object key)
+        {
+            if (key is string keyString)
+                return keyString;
+            if (key is IEnumerable e)
+            {
+                var output = new StringBuilder();
+                foreach(var i in e)
+                {
+                    if (output.Length > 0)
+                    {
+                        output.Append(", ");
+                    }
+                    output.Append(i);
+                }
+                return output.ToString();
+            }
+            return key.ToString();
         }
 
         internal string FormatMergeModeMessage(Format format, string keysAvailable = null, string keysUnavailable = null, string typeString = null)
@@ -558,31 +567,118 @@ namespace UnityEngine.AddressableAssets
     /// <summary>
     /// Entry point for Addressable API, this provides a simpler interface than using ResourceManager directly as it assumes string address type.
     /// </summary>
+    /// <remarks>
+    /// While the Addressables API works in the Editor, entering or leaving playmode will clear
+    /// the underlying context. Any editor script using this API in edit mode should register to
+    /// EditorApplication.playModeStateChanged to update its loaded references
+    /// when entering or leaving playmode to avoid null references to unloaded asset bundles.
+    /// </remarks>
     public static class Addressables
     {
-        internal static bool reinitializeAddressables = true;
-        internal static bool isExitingPlaymode = false;
-        internal static AddressablesImpl m_AddressablesInstance = new AddressablesImpl(new DefaultAllocationStrategy());
-
-        static AddressablesImpl m_Addressables
+#if UNITY_EDITOR
+        static AddressablesImpl s_AddressablesImpl;
+        static AddressablesImpl s_Addressables
         {
             get
             {
-#if UNITY_EDITOR
-                // Addressables in the Editor can be reinitialized when entering or exiting playmode.
-                // This waits until we are on the main thread so that calls like Addressables.Log don't
-                // end up calling the reinitialization code and blowing up if they're being called on
-                // a background thread.
-                if (InternalEditorUtility.CurrentThreadIsMainThread() && reinitializeAddressables && !isExitingPlaymode && EditorSettings.enterPlayModeOptionsEnabled)
-                {
-                    reinitializeAddressables = false;
-                    m_AddressablesInstance.ReleaseSceneManagerOperation();
-                    m_AddressablesInstance = new AddressablesImpl(new DefaultAllocationStrategy());
-                }
-#endif
-                return m_AddressablesInstance;
+                s_AddressablesImpl ??= new AddressablesImpl(new DefaultAllocationStrategy());
+                return s_AddressablesImpl;
             }
         }
+#else
+        static AddressablesImpl s_Addressables = new AddressablesImpl(new DefaultAllocationStrategy());
+#endif
+
+#if UNITY_EDITOR
+        /// <summary>
+        /// Whether to log warning on entering Playmode if the Addressables have been used in edit mode.
+        /// </summary>
+        /// <remarks>
+        /// When entering playmode with domain reload disabled, Addressables loaded by any editor scripts
+        /// might be unloaded to ensure a clean context while playing.
+        /// Editor scripts actively using Addressables outside playmode
+        /// should register to EditorApplication.playModeStateChanged to unload/reload their referenced
+        /// assets when the state mode changes.
+        /// </remarks>
+        public static bool WarnOnAddressablesUsageOutsidePlaymode
+        {
+            get => s_WarnOnAddressablesUsageOutsidePlaymode;
+            set
+            {
+                if (value != s_WarnOnAddressablesUsageOutsidePlaymode)
+                {
+                    EditorPrefs.SetBool("Addressables.WarnOnAddressableUsageOutsidePlaymode", value);
+                    s_WarnOnAddressablesUsageOutsidePlaymode = value;
+                }
+            }
+        }
+        static bool s_WarnOnAddressablesUsageOutsidePlaymode;
+
+        /// <summary>
+        /// Ensure the Addressables context is always clean when loading the player,
+        /// specifically when entering playmode in the editor.
+        /// </summary>
+        /// <remarks>
+        /// Because <see cref="s_Addressables"/> is valid to be used in edit mode,
+        /// it has to be initialized with both InitializeOnLoadMethod and RuntimeInitializeOnLoadMethod.
+        /// </remarks>
+        /// <remarks>
+        /// Note that the context is cleared when entering and leaving playmode.
+        /// It means that editor scripts using it might have to also register to
+        /// EditorApplication.playModeStateChanged to update their references properly.
+        /// </remarks>
+        [InitializeOnLoadMethod]
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        static void Initialize()
+        {
+            s_WarnOnAddressablesUsageOutsidePlaymode = EditorPrefs.GetBool("Addressables.WarnOnAddressableUsageOutsidePlaymode", true);
+
+            EditorApplication.playModeStateChanged -= PlayModeStateChangedCleanup;
+            EditorApplication.playModeStateChanged += PlayModeStateChangedCleanup;
+            if (s_AddressablesImpl != null)
+            {
+                InternalIdTransformFunc = null;
+                WebRequestOverride = null;
+                s_AddressablesImpl.Dispose();
+                s_AddressablesImpl = null;
+            }
+
+            // These two should probably be readonly, but given it is public, we would have to obsolete and replace them first.
+            LibraryPath = "Library/com.unity.addressables/";
+            BuildReportPath = "Library/com.unity.addressables/BuildReports/";
+        }
+
+        static void PlayModeStateChangedCleanup(PlayModeStateChange change)
+        {
+            if (s_AddressablesImpl == null)
+                return;
+
+            // Cleaning up the Addressables registration when playmode changes
+            // to ensure no editor handles are being kept pointing to unloaded assetbundle.
+            if (change == PlayModeStateChange.ExitingPlayMode)
+            {
+                InternalIdTransformFunc = null;
+                WebRequestOverride = null;
+                s_AddressablesImpl.Dispose();
+                s_AddressablesImpl = null;
+            }
+            else if (change == PlayModeStateChange.ExitingEditMode)
+            {
+                if (WarnOnAddressablesUsageOutsidePlaymode)
+                {
+                    Debug.LogWarning(
+                        "The Addressables class was used outside playmode and loaded references might be invalidated when entering playmode. " +
+                        "Ensure that your Editor scripts are registered to EditorApplication.playModeStateChanged " +
+                        "to reload what is needed. This warning can be turned off in Preferences/Addressables.");
+                }
+                InternalIdTransformFunc = null;
+                WebRequestOverride = null;
+                s_AddressablesImpl.Dispose();
+                s_AddressablesImpl = null;
+            }
+
+        }
+#endif
 
         /// <summary>
         /// Returns the Addressables package version in Unity 2019.3 or newer
@@ -601,38 +697,13 @@ namespace UnityEngine.AddressableAssets
         /// </summary>
         public static ResourceManager ResourceManager
         {
-            get { return m_Addressables.ResourceManager; }
+            get { return s_Addressables.ResourceManager; }
         }
 
         internal static AddressablesImpl Instance
         {
-            get { return m_Addressables; }
+            get { return s_Addressables; }
         }
-
-#if UNITY_EDITOR
-        [InitializeOnLoadMethod]
-        static void RegisterPlayModeStateChange()
-        {
-            EditorApplication.playModeStateChanged -= SetAddressablesReInitFlagOnPlayModeChange;
-            EditorApplication.playModeStateChanged += SetAddressablesReInitFlagOnPlayModeChange;
-        }
-
-        static void SetAddressablesReInitFlagOnPlayModeChange(PlayModeStateChange change)
-        {
-            if (change == PlayModeStateChange.EnteredEditMode || change == PlayModeStateChange.ExitingPlayMode)
-            {
-                isExitingPlaymode = true;
-                // Set flag IMMEDIATELY instead of via delayCall to eliminate race condition
-                // where the flag might not be set when operations start in the next cycle
-                reinitializeAddressables = true;
-            }
-            else
-            {
-                isExitingPlaymode = false;
-            }
-        }
-
-#endif
 
         /// <summary>
         /// The Instance Provider used by the Addressables System.
@@ -648,7 +719,7 @@ namespace UnityEngine.AddressableAssets
         /// </example>
         public static IInstanceProvider InstanceProvider
         {
-            get { return m_Addressables.InstanceProvider; }
+            get { return s_Addressables.InstanceProvider; }
         }
 
         /// <summary>
@@ -662,18 +733,18 @@ namespace UnityEngine.AddressableAssets
         }
 
         /// <inheritdoc cref="ResourceManager.InternalIdTransformFunc"/>
-        static public Func<IResourceLocation, string> InternalIdTransformFunc
+        public static Func<IResourceLocation, string> InternalIdTransformFunc
         {
-            get { return m_Addressables.InternalIdTransformFunc; }
-            set { m_Addressables.InternalIdTransformFunc = value; }
+            get { return s_Addressables.InternalIdTransformFunc; }
+            set { s_Addressables.InternalIdTransformFunc = value; }
         }
 
 
         /// <inheritdoc cref="ResourceManager.WebRequestOverride"/>
         public static Action<UnityWebRequest> WebRequestOverride
         {
-            get { return m_Addressables.WebRequestOverride; }
-            set { m_Addressables.WebRequestOverride = value; }
+            get { return s_Addressables.WebRequestOverride; }
+            set { s_Addressables.WebRequestOverride = value; }
         }
 
         /// <summary>
@@ -710,14 +781,14 @@ namespace UnityEngine.AddressableAssets
         }
 
         /// <summary>
-        /// The name of the PlayerPrefs value used to set the path to load the addressables runtime data file.
+        /// Key for Unity Editor SessionState (play mode) used to set the path to load the addressables runtime data file.
         /// </summary>
         public const string kAddressablesRuntimeDataPath = "AddressablesRuntimeDataPath";
 
         const string k_AddressablesLogConditional = "ADDRESSABLES_LOG_ALL";
 
         /// <summary>
-        /// The name of the PlayerPrefs value used to set the path to check for build logs that need to be shown in the runtime.
+        /// Key for Unity Editor SessionState (play mode) used to set the path to check for build logs that need to be shown in the runtime.
         /// </summary>
         public const string kAddressablesRuntimeBuildLogPath = "AddressablesRuntimeBuildLog";
 
@@ -812,7 +883,7 @@ namespace UnityEngine.AddressableAssets
         /// <value>The resource locators collection.</value>
         public static IEnumerable<IResourceLocator> ResourceLocators
         {
-            get { return m_Addressables.ResourceLocators; }
+            get { return s_Addressables.ResourceLocators; }
         }
 
         [Conditional(k_AddressablesLogConditional)]
@@ -1021,7 +1092,7 @@ namespace UnityEngine.AddressableAssets
         /// <seealso href="xref:addressables-api-load-content-catalog-async">Managing catalogs at runtime</seealso>
         public static AsyncOperationHandle<IResourceLocator> InitializeAsync()
         {
-            return m_Addressables.InitializeAsync();
+            return s_Addressables.InitializeAsync();
         }
 
         /// <summary>
@@ -1031,7 +1102,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>AsyncOperationHandle that is used to check when the operation has completed. The result of the operation is an [IResourceLocator](xref:UnityEngine.AddressableAssets.ResourceLocators.IResourceLocator)  object.</returns>
         public static AsyncOperationHandle<IResourceLocator> InitializeAsync(bool autoReleaseHandle)
         {
-            return m_Addressables.InitializeAsync(autoReleaseHandle);
+            return s_Addressables.InitializeAsync(autoReleaseHandle);
         }
 
         /// <summary>
@@ -1039,19 +1110,24 @@ namespace UnityEngine.AddressableAssets
         /// </summary>
         /// <remarks>
         /// You can cache content catalog by providing the hash file created for the catalog by the Addressables content build
-        /// at the same URL as the catalog JSON file. The Addressables system uses this hash file to determine if the cached catalog
+        /// at the same URL as the catalog file. The Addressables system uses this hash file to determine if the cached catalog
         /// needs to be updated. If the value in the hash file has not changed since the last time you loaded the same catalog,
         /// this function loads the cached version instead of downloading the catalog. If the hash value has changed or if no
         /// hash file is provided, Addressables downloads the catalog from the specified path before loading it into memory.
         ///
+        /// The path must end with the catalog file name. Addressables reads that name from the
+        /// end to get the catalog's extension and to find the matching hash file. If the path
+        /// has a query string, the catalog file name must be its last value, as in a Unity CCD
+        /// URL ending `?path=/catalog_a1b2.bin`.
+        ///
         /// See also: [Managing catalogs at runtime](xref:addressables-api-load-content-catalog-async)
         /// </remarks>
-        /// <param name="catalogPath">The path to the runtime data.</param>
+        /// <param name="catalogPath">The path to the runtime data. Must end with the catalog file name.</param>
         /// <param name="providerSuffix">This value, if not null or empty, will be appended to all provider ids loaded from this data.</param>
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IResourceLocator> LoadContentCatalogAsync(string catalogPath, string providerSuffix = null)
         {
-            return m_Addressables.LoadContentCatalogAsync(catalogPath, false, providerSuffix);
+            return s_Addressables.LoadContentCatalogAsync(catalogPath, false, providerSuffix);
         }
 
         /// <summary>
@@ -1064,16 +1140,21 @@ namespace UnityEngine.AddressableAssets
         /// this function loads the cached version instead of downloading the catalog. If the hash value has changed or if no
         /// hash file is provided, Addressables downloads the catalog from the specified path before loading it into memory.
         ///
+        /// The path must end with the catalog file name. Addressables reads that name from the
+        /// end to get the catalog's extension and to find the matching hash file. If the path
+        /// has a query string, the catalog file name must be its last value, as in a Unity CCD
+        /// URL ending `?path=/catalog_a1b2.bin`.
+        ///
         /// See also: [Managing catalogs at runtime](xref:addressables-api-load-content-catalog-async)
         /// </remarks>
-        /// <param name="catalogPath">The path to the runtime data.</param>
+        /// <param name="catalogPath">The path to the runtime data. Must end with the catalog file name.</param>
         /// <param name="autoReleaseHandle">If true, the async operation handle will be automatically released on completion. Typically,
         /// there is no reason to hold on to the handle for this operation.</param>
         /// <param name="providerSuffix">This value, if not null or empty, will be appended to all provider ids loaded from this data.</param>
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IResourceLocator> LoadContentCatalogAsync(string catalogPath, bool autoReleaseHandle, string providerSuffix = null)
         {
-            return m_Addressables.LoadContentCatalogAsync(catalogPath, autoReleaseHandle, providerSuffix);
+            return s_Addressables.LoadContentCatalogAsync(catalogPath, autoReleaseHandle, providerSuffix);
         }
 
         /// <summary>
@@ -1105,7 +1186,7 @@ namespace UnityEngine.AddressableAssets
         /// </example>
         public static AsyncOperationHandle<TObject> LoadAssetAsync<TObject>(IResourceLocation location)
         {
-            return m_Addressables.LoadAssetAsync<TObject>(location);
+            return s_Addressables.LoadAssetAsync<TObject>(location);
         }
 
         /// <summary>
@@ -1124,7 +1205,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>AsyncOperationHandle that is used to check when the operation has completed. The result of the operation is the loaded asset of the type `TObject`.</returns>
         public static AsyncOperationHandle<TObject> LoadAssetAsync<TObject>(object key)
         {
-            return m_Addressables.LoadAssetAsync<TObject>(key);
+            return s_Addressables.LoadAssetAsync<TObject>(key);
         }
 
         /// <summary>
@@ -1145,7 +1226,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<IResourceLocation>> LoadResourceLocationsAsync(IEnumerable keys, MergeMode mode, Type type = null)
         {
-            return m_Addressables.LoadResourceLocationsAsync(keys, mode, type);
+            return s_Addressables.LoadResourceLocationsAsync(keys, mode, type);
         }
 
         /// <summary>
@@ -1165,7 +1246,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<IResourceLocation>> LoadResourceLocationsAsync(object key, Type type = null)
         {
-            return m_Addressables.LoadResourceLocationsAsync(key, type);
+            return s_Addressables.LoadResourceLocationsAsync(key, type);
         }
 
         /// <summary>
@@ -1194,7 +1275,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(IList<IResourceLocation> locations, Action<TObject> callback)
         {
-            return m_Addressables.LoadAssetsAsync(locations, callback, true);
+            return s_Addressables.LoadAssetsAsync(locations, callback, true);
         }
 
         /// <summary>
@@ -1236,7 +1317,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(IList<IResourceLocation> locations, Action<TObject> callback, bool releaseDependenciesOnFailure)
         {
-            return m_Addressables.LoadAssetsAsync(locations, callback, releaseDependenciesOnFailure);
+            return s_Addressables.LoadAssetsAsync(locations, callback, releaseDependenciesOnFailure);
         }
 
         /// <summary>
@@ -1269,7 +1350,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(IEnumerable keys, Action<TObject> callback, MergeMode mode)
         {
-            return m_Addressables.LoadAssetsAsync(keys, callback, mode, true);
+            return s_Addressables.LoadAssetsAsync(keys, callback, mode, true);
         }
 
         /// <summary>
@@ -1301,7 +1382,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(string key, Action<TObject> callback = null)
         {
-            return m_Addressables.LoadAssetsAsync(new List<string>() { key }, callback, MergeMode.None, true);
+            return s_Addressables.LoadAssetsAsync(new List<string>() { key }, callback, MergeMode.None, true);
         }
 
         /// <summary>
@@ -1348,7 +1429,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(IEnumerable keys, Action<TObject> callback, MergeMode mode, bool releaseDependenciesOnFailure)
         {
-            return m_Addressables.LoadAssetsAsync(keys, callback, mode, releaseDependenciesOnFailure);
+            return s_Addressables.LoadAssetsAsync(keys, callback, mode, releaseDependenciesOnFailure);
         }
 
         /// <summary>
@@ -1393,7 +1474,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(string key, bool releaseDependenciesOnFailure, Action<TObject> callback = null)
         {
-            return m_Addressables.LoadAssetsAsync(new List<string>() { key }, callback, MergeMode.None, releaseDependenciesOnFailure);
+            return s_Addressables.LoadAssetsAsync(new List<string>() { key }, callback, MergeMode.None, releaseDependenciesOnFailure);
         }
 
         /// <summary>
@@ -1424,7 +1505,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(object key, Action<TObject> callback)
         {
-            return m_Addressables.LoadAssetsAsync(key, callback, true);
+            return s_Addressables.LoadAssetsAsync(key, callback, true);
         }
 
         /// <summary>
@@ -1466,7 +1547,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<IList<TObject>> LoadAssetsAsync<TObject>(object key, Action<TObject> callback, bool releaseDependenciesOnFailure)
         {
-            return m_Addressables.LoadAssetsAsync(key, callback, releaseDependenciesOnFailure);
+            return s_Addressables.LoadAssetsAsync(key, callback, releaseDependenciesOnFailure);
         }
 
         /// <summary>
@@ -1476,7 +1557,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="obj">The asset to release.</param>
         public static void Release<TObject>(TObject obj)
         {
-            m_Addressables.Release(obj);
+            s_Addressables.Release(obj);
         }
 
         /// <summary>
@@ -1505,7 +1586,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>Returns true if the instance was successfully released.</returns>
         public static bool ReleaseInstance(GameObject instance)
         {
-            return m_Addressables.ReleaseInstance(instance);
+            return s_Addressables.ReleaseInstance(instance);
         }
 
         /// <summary>
@@ -1539,7 +1620,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="key">The key of the asset(s) to get the download size of.</param>
         public static AsyncOperationHandle<long> GetDownloadSizeAsync(object key)
         {
-            return m_Addressables.GetDownloadSizeAsync(key);
+            return s_Addressables.GetDownloadSizeAsync(key);
         }
 
         /// <summary>
@@ -1551,7 +1632,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="key">The key of the asset(s) to get the download size of.</param>
         public static AsyncOperationHandle<long> GetDownloadSizeAsync(string key)
         {
-            return m_Addressables.GetDownloadSizeAsync((object)key);
+            return s_Addressables.GetDownloadSizeAsync((object)key);
         }
 
         /// <summary>
@@ -1560,10 +1641,11 @@ namespace UnityEngine.AddressableAssets
         /// is the download size in bytes.
         /// </summary>
         /// <returns>The operation handle for the request.</returns>
-        /// <param name="keys">The keys of the asset(s) to get the download size of.</param>
+        /// <param name="keys">The keys of the asset(s) to get the download size of. An element may also be
+        /// an <see cref="IResourceLocation"/>, or a list of them, to skip resolving keys again.</param>
         public static AsyncOperationHandle<long> GetDownloadSizeAsync(IEnumerable keys)
         {
-            return m_Addressables.GetDownloadSizeAsync(keys);
+            return s_Addressables.GetDownloadSizeAsync(keys);
         }
 
         /// <summary>
@@ -1585,7 +1667,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The AsyncOperationHandle for the dependency load operation.</returns>
         public static AsyncOperationHandle DownloadDependenciesAsync(object key, bool autoReleaseHandle = false)
         {
-            return m_Addressables.DownloadDependenciesAsync(key, autoReleaseHandle);
+            return s_Addressables.DownloadDependenciesAsync(key, autoReleaseHandle);
         }
 
         /// <summary>
@@ -1607,7 +1689,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The AsyncOperationHandle for the dependency load.</returns>
         public static AsyncOperationHandle DownloadDependenciesAsync(IList<IResourceLocation> locations, bool autoReleaseHandle = false)
         {
-            return m_Addressables.DownloadDependenciesAsync(locations, autoReleaseHandle);
+            return s_Addressables.DownloadDependenciesAsync(locations, autoReleaseHandle);
         }
 
         /// <summary>
@@ -1633,7 +1715,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The AsyncOperationHandle for the dependency load operation.</returns>
         public static AsyncOperationHandle DownloadDependenciesAsync(IEnumerable keys, MergeMode mode, bool autoReleaseHandle = false)
         {
-            return m_Addressables.DownloadDependenciesAsync(keys, mode, autoReleaseHandle);
+            return s_Addressables.DownloadDependenciesAsync(keys, mode, autoReleaseHandle);
         }
 
         /// <summary>
@@ -1648,7 +1730,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="key">The key to clear the cache for.</param>
         public static void ClearDependencyCacheAsync(object key)
         {
-            m_Addressables.ClearDependencyCacheAsync(key, true);
+            s_Addressables.ClearDependencyCacheAsync(key, true);
         }
 
         /// <summary>
@@ -1663,7 +1745,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="locations">The locations to clear the cache for.</param>
         public static void ClearDependencyCacheAsync(IList<IResourceLocation> locations)
         {
-            m_Addressables.ClearDependencyCacheAsync(locations, true);
+            s_Addressables.ClearDependencyCacheAsync(locations, true);
         }
 
         /// <summary>
@@ -1678,7 +1760,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="keys">The keys to clear the cache for.</param>
         public static void ClearDependencyCacheAsync(IEnumerable keys)
         {
-            m_Addressables.ClearDependencyCacheAsync(keys, true);
+            s_Addressables.ClearDependencyCacheAsync(keys, true);
         }
 
         /// <summary>
@@ -1693,7 +1775,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="key">The key to clear the cache for.</param>
         public static void ClearDependencyCacheAsync(string key)
         {
-            m_Addressables.ClearDependencyCacheAsync((object)key, true);
+            s_Addressables.ClearDependencyCacheAsync((object)key, true);
         }
 
         /// <summary>
@@ -1710,7 +1792,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<bool> ClearDependencyCacheAsync(object key, bool autoReleaseHandle)
         {
-            return m_Addressables.ClearDependencyCacheAsync(key, autoReleaseHandle);
+            return s_Addressables.ClearDependencyCacheAsync(key, autoReleaseHandle);
         }
 
         /// <summary>
@@ -1727,7 +1809,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<bool> ClearDependencyCacheAsync(IList<IResourceLocation> locations, bool autoReleaseHandle)
         {
-            return m_Addressables.ClearDependencyCacheAsync(locations, autoReleaseHandle);
+            return s_Addressables.ClearDependencyCacheAsync(locations, autoReleaseHandle);
         }
 
         /// <summary>
@@ -1744,7 +1826,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<bool> ClearDependencyCacheAsync(IEnumerable keys, bool autoReleaseHandle)
         {
-            return m_Addressables.ClearDependencyCacheAsync(keys, autoReleaseHandle);
+            return s_Addressables.ClearDependencyCacheAsync(keys, autoReleaseHandle);
         }
 
         /// <summary>
@@ -1761,7 +1843,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<bool> ClearDependencyCacheAsync(string key, bool autoReleaseHandle)
         {
-            return m_Addressables.ClearDependencyCacheAsync((object)key, autoReleaseHandle);
+            return s_Addressables.ClearDependencyCacheAsync((object)key, autoReleaseHandle);
         }
 
         /// <summary>
@@ -1779,7 +1861,7 @@ namespace UnityEngine.AddressableAssets
         /// </example>
         public static ResourceLocatorInfo GetLocatorInfo(string locatorId)
         {
-            return m_Addressables.GetLocatorInfo(locatorId);
+            return s_Addressables.GetLocatorInfo(locatorId);
         }
 
         /// <summary>
@@ -1789,7 +1871,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>Container for content catalog data pertaining to the [IResourceLocator](xref:UnityEngine.AddressableAssets.ResourceLocators.IResourceLocator) object.</returns>
         public static ResourceLocatorInfo GetLocatorInfo(IResourceLocator locator)
         {
-            return m_Addressables.GetLocatorInfo(locator.LocatorId);
+            return s_Addressables.GetLocatorInfo(locator.LocatorId);
         }
 
         /// <summary>
@@ -1825,7 +1907,7 @@ namespace UnityEngine.AddressableAssets
         /// </example>
         public static AsyncOperationHandle<GameObject> InstantiateAsync(IResourceLocation location, Transform parent = null, bool instantiateInWorldSpace = false, bool trackHandle = true)
         {
-            return m_Addressables.InstantiateAsync(location, new InstantiationParameters(parent, instantiateInWorldSpace), trackHandle);
+            return s_Addressables.InstantiateAsync(location, new InstantiationParameters(parent, instantiateInWorldSpace), trackHandle);
         }
 
         /// <summary>
@@ -1839,7 +1921,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>AsyncOperationHandle that is used to check when the operation has completed. The result of the operation is a GameObject.</returns>
         public static AsyncOperationHandle<GameObject> InstantiateAsync(IResourceLocation location, Vector3 position, Quaternion rotation, Transform parent = null, bool trackHandle = true)
         {
-            return m_Addressables.InstantiateAsync(location, position, rotation, parent, trackHandle);
+            return s_Addressables.InstantiateAsync(location, position, rotation, parent, trackHandle);
         }
 
         /// <summary>
@@ -1852,7 +1934,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>AsyncOperationHandle that is used to check when the operation has completed. The result of the operation is a GameObject.</returns>
         public static AsyncOperationHandle<GameObject> InstantiateAsync(object key, Transform parent = null, bool instantiateInWorldSpace = false, bool trackHandle = true)
         {
-            return m_Addressables.InstantiateAsync(key, parent, instantiateInWorldSpace, trackHandle);
+            return s_Addressables.InstantiateAsync(key, parent, instantiateInWorldSpace, trackHandle);
         }
 
         /// <summary>
@@ -1866,7 +1948,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>AsyncOperationHandle that is used to check when the operation has completed. The result of the operation is a GameObject.</returns>
         public static AsyncOperationHandle<GameObject> InstantiateAsync(object key, Vector3 position, Quaternion rotation, Transform parent = null, bool trackHandle = true)
         {
-            return m_Addressables.InstantiateAsync(key, position, rotation, parent, trackHandle);
+            return s_Addressables.InstantiateAsync(key, position, rotation, parent, trackHandle);
         }
 
         /// <summary>
@@ -1878,7 +1960,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>AsyncOperationHandle that is used to check when the operation has completed. The result of the operation is a GameObject.</returns>
         public static AsyncOperationHandle<GameObject> InstantiateAsync(object key, InstantiationParameters instantiateParameters, bool trackHandle = true)
         {
-            return m_Addressables.InstantiateAsync(key, instantiateParameters, trackHandle);
+            return s_Addressables.InstantiateAsync(key, instantiateParameters, trackHandle);
         }
 
         /// <summary>
@@ -1890,7 +1972,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>AsyncOperationHandle that is used to check when the operation has completed. The result of the operation is a GameObject.</returns>
         public static AsyncOperationHandle<GameObject> InstantiateAsync(IResourceLocation location, InstantiationParameters instantiateParameters, bool trackHandle = true)
         {
-            return m_Addressables.InstantiateAsync(location, instantiateParameters, trackHandle);
+            return s_Addressables.InstantiateAsync(location, instantiateParameters, trackHandle);
         }
 
         /// <summary>
@@ -1911,7 +1993,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(object key, LoadSceneMode loadMode = LoadSceneMode.Single, bool activateOnLoad = true, int priority = 100, SceneReleaseMode releaseMode = SceneReleaseMode.ReleaseSceneWhenSceneUnloaded)
         {
-            return m_Addressables.LoadSceneAsync(key, new LoadSceneParameters(loadMode), releaseMode, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(key, new LoadSceneParameters(loadMode), releaseMode, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -1932,7 +2014,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(object key, LoadSceneMode loadMode, SceneReleaseMode releaseMode, bool activateOnLoad = true, int priority = 100)
         {
-            return m_Addressables.LoadSceneAsync(key, new LoadSceneParameters(loadMode), releaseMode, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(key, new LoadSceneParameters(loadMode), releaseMode, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -1945,7 +2027,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(object key, LoadSceneParameters loadSceneParameters, bool activateOnLoad = true, int priority = 100)
         {
-            return m_Addressables.LoadSceneAsync(key, loadSceneParameters, SceneReleaseMode.ReleaseSceneWhenSceneUnloaded, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(key, loadSceneParameters, SceneReleaseMode.ReleaseSceneWhenSceneUnloaded, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -1959,7 +2041,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(object key, LoadSceneParameters loadSceneParameters, SceneReleaseMode releaseMode, bool activateOnLoad = true, int priority = 100)
         {
-            return m_Addressables.LoadSceneAsync(key, loadSceneParameters, releaseMode, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(key, loadSceneParameters, releaseMode, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -1972,7 +2054,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(IResourceLocation location, LoadSceneMode loadMode = LoadSceneMode.Single, bool activateOnLoad = true, int priority = 100)
         {
-            return m_Addressables.LoadSceneAsync(location, new LoadSceneParameters(loadMode), SceneReleaseMode.ReleaseSceneWhenSceneUnloaded, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(location, new LoadSceneParameters(loadMode), SceneReleaseMode.ReleaseSceneWhenSceneUnloaded, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -1986,7 +2068,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(IResourceLocation location, LoadSceneMode loadMode, SceneReleaseMode releaseMode, bool activateOnLoad = true, int priority = 100)
         {
-            return m_Addressables.LoadSceneAsync(location, new LoadSceneParameters(loadMode), releaseMode, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(location, new LoadSceneParameters(loadMode), releaseMode, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -1999,7 +2081,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(IResourceLocation location, LoadSceneParameters loadSceneParameters, bool activateOnLoad = true, int priority = 100)
         {
-            return m_Addressables.LoadSceneAsync(location, loadSceneParameters, SceneReleaseMode.ReleaseSceneWhenSceneUnloaded, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(location, loadSceneParameters, SceneReleaseMode.ReleaseSceneWhenSceneUnloaded, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -2013,7 +2095,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the request.</returns>
         public static AsyncOperationHandle<SceneInstance> LoadSceneAsync(IResourceLocation location, LoadSceneParameters loadSceneParameters, SceneReleaseMode releaseMode, bool activateOnLoad = true, int priority = 100)
         {
-            return m_Addressables.LoadSceneAsync(location, loadSceneParameters, releaseMode, activateOnLoad, priority);
+            return s_Addressables.LoadSceneAsync(location, loadSceneParameters, releaseMode, activateOnLoad, priority);
         }
 
         /// <summary>
@@ -2034,7 +2116,7 @@ namespace UnityEngine.AddressableAssets
         /// </example>
         public static AsyncOperationHandle<SceneInstance> UnloadSceneAsync(SceneInstance scene, UnloadSceneOptions unloadOptions, bool autoReleaseHandle = true)
         {
-            return m_Addressables.UnloadSceneAsync(scene, unloadOptions, autoReleaseHandle);
+            return s_Addressables.UnloadSceneAsync(scene, unloadOptions, autoReleaseHandle);
         }
 
         /// <summary>
@@ -2046,7 +2128,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the scene unload.</returns>
         public static AsyncOperationHandle<SceneInstance> UnloadSceneAsync(AsyncOperationHandle handle, UnloadSceneOptions unloadOptions, bool autoReleaseHandle = true)
         {
-            return m_Addressables.UnloadSceneAsync(handle, unloadOptions, autoReleaseHandle);
+            return s_Addressables.UnloadSceneAsync(handle, unloadOptions, autoReleaseHandle);
         }
 
         /// <summary>
@@ -2057,7 +2139,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the scene unload.</returns>
         public static AsyncOperationHandle<SceneInstance> UnloadSceneAsync(SceneInstance scene, bool autoReleaseHandle = true)
         {
-            return m_Addressables.UnloadSceneAsync(scene, UnloadSceneOptions.None, autoReleaseHandle);
+            return s_Addressables.UnloadSceneAsync(scene, UnloadSceneOptions.None, autoReleaseHandle);
         }
 
         /// <summary>
@@ -2068,7 +2150,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the scene unload.</returns>
         public static AsyncOperationHandle<SceneInstance> UnloadSceneAsync(AsyncOperationHandle handle, bool autoReleaseHandle = true)
         {
-            return m_Addressables.UnloadSceneAsync(handle, UnloadSceneOptions.None, autoReleaseHandle);
+            return s_Addressables.UnloadSceneAsync(handle, UnloadSceneOptions.None, autoReleaseHandle);
         }
 
         /// <summary>
@@ -2079,7 +2161,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation handle for the scene unload.</returns>
         public static AsyncOperationHandle<SceneInstance> UnloadSceneAsync(AsyncOperationHandle<SceneInstance> handle, bool autoReleaseHandle = true)
         {
-            return m_Addressables.UnloadSceneAsync(handle, UnloadSceneOptions.None, autoReleaseHandle);
+            return s_Addressables.UnloadSceneAsync(handle, UnloadSceneOptions.None, autoReleaseHandle);
         }
 
         /// <summary>
@@ -2089,7 +2171,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>The operation containing the list of catalog ids that have an available update.  This can be used to filter which catalogs to update with the UpdateContent.</returns>
         public static AsyncOperationHandle<List<string>> CheckForCatalogUpdates(bool autoReleaseHandle = true)
         {
-            return m_Addressables.CheckForCatalogUpdates(autoReleaseHandle);
+            return s_Addressables.CheckForCatalogUpdates(autoReleaseHandle);
         }
 
         /// <summary>
@@ -2129,7 +2211,7 @@ namespace UnityEngine.AddressableAssets
         /// <seealso href="xref:addressables-api-load-content-catalog-async">Updating catalogs</seealso>
         public static AsyncOperationHandle<List<IResourceLocator>> UpdateCatalogs(IEnumerable<string> catalogs = null, bool autoReleaseHandle = true)
         {
-            return m_Addressables.UpdateCatalogs(catalogs, autoReleaseHandle, false);
+            return s_Addressables.UpdateCatalogs(catalogs, autoReleaseHandle, false);
         }
 
         /// <summary>
@@ -2142,7 +2224,7 @@ namespace UnityEngine.AddressableAssets
         public static AsyncOperationHandle<List<IResourceLocator>>
             UpdateCatalogs(bool autoCleanBundleCache, IEnumerable<string> catalogs = null, bool autoReleaseHandle = true) // autoCleanBundleCache must be listed first to avoid breaking API
         {
-            return m_Addressables.UpdateCatalogs(catalogs, autoReleaseHandle, autoCleanBundleCache);
+            return s_Addressables.UpdateCatalogs(catalogs, autoReleaseHandle, autoCleanBundleCache);
         }
 
         /// <summary>
@@ -2172,7 +2254,7 @@ namespace UnityEngine.AddressableAssets
         /// </example>
         public static void AddResourceLocator(IResourceLocator locator, string localCatalogHash = null, IResourceLocation remoteCatalogLocation = null)
         {
-            m_Addressables.AddResourceLocator(locator, localCatalogHash, remoteCatalogLocation);
+            s_Addressables.AddResourceLocator(locator, localCatalogHash, remoteCatalogLocation);
         }
 
         /// <summary>
@@ -2181,7 +2263,7 @@ namespace UnityEngine.AddressableAssets
         /// <param name="locator">The locator to remove.</param>
         public static void RemoveResourceLocator(IResourceLocator locator)
         {
-            m_Addressables.RemoveResourceLocator(locator);
+            s_Addressables.RemoveResourceLocator(locator);
         }
 
         /// <summary>
@@ -2189,7 +2271,7 @@ namespace UnityEngine.AddressableAssets
         /// </summary>
         public static void ClearResourceLocators()
         {
-            m_Addressables.ClearResourceLocators();
+            s_Addressables.ClearResourceLocators();
         }
 
         /// <summary>
@@ -2218,7 +2300,7 @@ namespace UnityEngine.AddressableAssets
         /// </example>
         public static AsyncOperationHandle<bool> CleanBundleCache(IEnumerable<string> catalogsIds = null)
         {
-            return m_Addressables.CleanBundleCache(catalogsIds, false);
+            return s_Addressables.CleanBundleCache(catalogsIds, false);
         }
 
         /// <summary>
@@ -2233,7 +2315,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>A resource location with exactly 2 dependencies.  The first points to the assumed remote hash file location.  The second points to the local hash file location.</returns>
         public static ResourceLocationBase CreateCatalogLocationWithHashDependencies<T>(string remoteCatalogPath) where T : IResourceProvider
         {
-            return m_Addressables.CreateCatalogLocationWithHashDependencies<T>(remoteCatalogPath);
+            return s_Addressables.CreateCatalogLocationWithHashDependencies<T>(remoteCatalogPath);
         }
 
         /// <summary>
@@ -2248,7 +2330,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>A resource location with exactly 2 dependencies.  The first points to the assumed remote hash file location.  The second points to the local hash file location.</returns>
         public static ResourceLocationBase CreateCatalogLocationWithHashDependencies<T>(IResourceLocation remoteCatalogLocation) where T : IResourceProvider
         {
-            return m_Addressables.CreateCatalogLocationWithHashDependencies<T>(remoteCatalogLocation);
+            return s_Addressables.CreateCatalogLocationWithHashDependencies<T>(remoteCatalogLocation);
         }
 
         /// <summary>
@@ -2263,7 +2345,7 @@ namespace UnityEngine.AddressableAssets
         /// <returns>A resource location with exactly 2 dependencies.  The first points to the assumed remote hash file location.  The second points to the local hash file location.</returns>
         public static ResourceLocationBase CreateCatalogLocationWithHashDependencies<T>(string remoteCatalogPath, string remoteHashPath) where T : IResourceProvider
         {
-            return m_Addressables.CreateCatalogLocationWithHashDependencies<T>(remoteCatalogPath, remoteHashPath);
+            return s_Addressables.CreateCatalogLocationWithHashDependencies<T>(remoteCatalogPath, remoteHashPath);
         }
     }
 }
