@@ -113,15 +113,14 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                 if (group != null)
                 {
                     var abSchema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (abSchema != null && abSchema.IsEnabled)
 #if !UNITY_WEBGL
+                    if (abSchema != null && abSchema.IsEnabled)
                         return abSchema.GetBuildCompressionForBundle(identifier);
-#else
-                        return BuildCompression.LZ4Runtime;
-#endif
-                    }
                     else
                         Debug.LogWarningFormat("Bundle group {0} does not have an enabled BundledAssetGroupSchema.", group.name);
+#else
+                    return BuildCompression.LZ4Runtime;
+#endif
                 }
                 else
                 {
