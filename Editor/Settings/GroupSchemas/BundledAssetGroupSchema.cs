@@ -979,11 +979,12 @@ namespace UnityEditor.AddressableAssets.Settings.GroupSchemas
                 EditorGUI.BeginProperty(position, label, property);
                 EditorGUI.showMixedValue = showMixedValue;
 
-                GUIContent[] contents = new GUIContent[4];
+                GUIContent[] contents = new GUIContent[5];
                 contents[0] = new GUIContent("Filename", "Leave filename unchanged.");
                 contents[1] = new GUIContent("Append Hash to Filename", "Append filename with the AssetBundle content hash.");
                 contents[2] = new GUIContent("Use Hash of AssetBundle", "Replace filename with AssetBundle hash.");
                 contents[3] = new GUIContent("Use Hash of Filename", "Replace filename with hash of filename.");
+                contents[4] = new GUIContent("Shortest possible", "Same as Use Hash of Filename but only 4 characters.");
 
                 int enumValue = property.enumValueIndex;
                 enumValue = enumValue == 0 ? 1 : enumValue == 1 ? 0 : enumValue;
