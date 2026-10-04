@@ -759,7 +759,6 @@ namespace UnityEditor.AddressableAssets.GUI
 #if ENABLE_CONTENT_DIRECTORIES
             OnCleanContentDirectory(false);
 #endif
-            OnCleanShaderCache(false);
         }
 
         void OnCleanAddressables(object builder)
