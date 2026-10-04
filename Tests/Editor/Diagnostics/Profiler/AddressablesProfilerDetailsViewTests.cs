@@ -1,25 +1,12 @@
-using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
-using System.Threading;
 using NUnit.Framework;
-using Unity.Collections;
 using UnityEditor.AddressableAssets.Build.Layout;
 using UnityEditor.AddressableAssets.Diagnostics;
-using UnityEditor.AddressableAssets.Settings;
-using UnityEditor.Build.Pipeline;
-using UnityEditor.VersionControl;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
-using UnityEngine.Playables;
-using UnityEngine.ResourceManagement.AsyncOperations;
 using UnityEngine.ResourceManagement.Profiling;
-using UnityEngine.ResourceManagement.ResourceProviders;
 using UnityEngine.ResourceManagement.Util;
 using UnityEngine.TestTools;
-using UnityEngine.UIElements;
-using TreeView = UnityEditor.IMGUI.Controls.TreeView;
 
 namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
 {
@@ -35,7 +22,7 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
             // this is an implementation of the profiler interfaces to allow us to create profile events
             // and then retrieve them for testing
             testProfiler = new TestProfiler();
-            ProfilerRuntime.m_profilerEmitter = testProfiler;
+            ProfilerRuntime.s_ProfilerEmitter = testProfiler;
             ProfilerRuntime.Initialise();
             AddressablesProfilerDetailsView.m_frameDataStore = testProfiler;
             AddressablesProfilerViewController.LayoutsManager.ClearReports();
@@ -52,6 +39,7 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
         [TearDown]
         public void TearDown()
         {
+            ProfilerRuntime.CleanUp();
             m_AddressablesProfilerDetailsView.Dispose();
         }
 
@@ -78,6 +66,7 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
 
         private void Test_GenerateContentData_FrameData(bool loadTextureBundle, bool loadSceneBundle, bool loadLocalAssets, bool loadFolderBundle)
         {
+            using var addressables = new AddressablesImpl(new DefaultAllocationStrategy());
             AddressablesProfilerViewController.LayoutsManager.LoadManualReport(AddressablesTestUtility.GetPackagePath() + "/Tests/Editor/Fixtures/buildlayout1.json");
             AddressablesProfilerViewController.LayoutsManager.AddActiveLayout("3e22efc5f159401a15e7d27179b7cc4c"); // this is the value of BuildResultHash in buildlayout1.json
             // this creates the build report
@@ -86,7 +75,7 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
             // texture bundle
             if (loadTextureBundle)
             {
-                var bundleEvents = new ProfilerEventBuilder(testProfiler).SetBundleName("c75e210455b9b7f32a8e902db35e6ee3")
+                var bundleEvents = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager).SetBundleName("c75e210455b9b7f32a8e902db35e6ee3")
                     .SendBundleEvent(1, ContentStatus.Loading)
                     .SendBundleEvent(2, ContentStatus.Active)
                     .SendBundleEvent(3, ContentStatus.Released);
@@ -96,7 +85,7 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
             // scene bundle
             if (loadSceneBundle)
             {
-                var bundleEvents2 = new ProfilerEventBuilder(testProfiler).SetBundleName("79f2518976c47599628aad579c012657")
+                var bundleEvents2 = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager).SetBundleName("79f2518976c47599628aad579c012657")
                     .SendBundleEvent(1, ContentStatus.Loading)
                     .SendBundleEvent(2, ContentStatus.Active)
                     .SendBundleEvent(3, ContentStatus.Released);
@@ -105,7 +94,7 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
             // default local assets
             if (loadLocalAssets)
             {
-                var bundleEvents3 = new ProfilerEventBuilder(testProfiler).SetBundleName("0113602827489280bf434abd9b49426c")
+                var bundleEvents3 = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager).SetBundleName("0113602827489280bf434abd9b49426c")
                     .SendBundleEvent(1, ContentStatus.Loading)
                     .SendBundleEvent(2, ContentStatus.Active)
                     .SendBundleEvent(3, ContentStatus.Released);
@@ -115,27 +104,27 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
             if (loadFolderBundle)
             {
 
-                var bundleEvents4 = new ProfilerEventBuilder(testProfiler).SetBundleName("6801756afe332320683f01526bb77e3d")
+                var bundleEvents4 = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager).SetBundleName("6801756afe332320683f01526bb77e3d")
                     .SendBundleEvent(1, ContentStatus.Loading)
                     .SendBundleEvent(2, ContentStatus.Active)
                     .SendBundleEvent(3, ContentStatus.Released);
             }
 
-            var sceneEvents = new ProfilerEventBuilder(testProfiler)
+            var sceneEvents = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager)
                 .SetAssetLocation("Assets/Scenes/SampleScene.unity", "79f2518976c47599628aad579c012657") // FIXME, should this take a builder so it can look this up for us?
                 .SendSceneEvent(1, ContentStatus.Loading)
                 .SendSceneEvent(2, ContentStatus.Active)
                 .SendSceneEvent(3, ContentStatus.Released);
-            var assetEvents = new ProfilerEventBuilder(testProfiler)
+            var assetEvents = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager)
                 .SetAssetLocation("Assets/khaki.png", "a1dd26be86668e2320052da88bcb6d39") // FIXME, should this take a builder so it can look this up for us?
                 .SendAssetEvent(1, ContentStatus.Loading)
                 .SendAssetEvent(2, ContentStatus.Active); // assets do not have an explicit released event
             // so this is an internal prefab, I need one with external references
-            var embeddedPrefabEvents = new ProfilerEventBuilder(testProfiler)
+            var embeddedPrefabEvents = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager)
                 .SetAssetLocation("Assets/Prefabs/YellowCube.prefab", "c75e210455b9b7f32a8e902db35e6ee3") // FIXME, should this take a builder so it can look this up for us?
                 .SendAssetEvent(1, ContentStatus.Loading)
                 .SendAssetEvent(2, ContentStatus.Active); // assets do not have an explicit released event
-            var referencePrefabEvents = new ProfilerEventBuilder(testProfiler)
+            var referencePrefabEvents = new ProfilerEventBuilder(testProfiler, addressables.ResourceManager)
                 .SetAssetLocation("Assets/Prefabs/Canvas.prefab", "c75e210455b9b7f32a8e902db35e6ee3") // FIXME, should this take a builder so it can look this up for us?
                 .SendAssetEvent(1, ContentStatus.Loading)
                 .SendAssetEvent(2, ContentStatus.Active); // assets do not have an explicit released event
@@ -249,6 +238,67 @@ namespace UnityEditor.AddressableAssets.Tests.Diagnostics.Profiler
                 valueCount++;
             }
             Assert.AreEqual(expected, valueCount);
+        }
+
+        private static AssetData MakeAsset(string name, int addressableHandles)
+        {
+            var data = new AssetData(new BuildLayout.ExplicitAsset
+            {
+                AddressableName = name,
+                AssetPath = "Assets/" + name + ".asset",
+                Guid = name
+            });
+            data.AddressableHandles = addressableHandles;
+            return data;
+        }
+
+        [Test]
+        public void Test_CollectAddressableReferenceChains_CyclicGraph_Terminates()
+        {
+            // A SpriteAtlas and its packed texture reference each other. Before the fix this
+            // cycle caused an infinite queue/recursion and an Editor OutOfMemoryException.
+            var texture = MakeAsset("texture", 0);
+            var atlas = MakeAsset("atlas", 1);
+            texture.AddReferenceBy(atlas); // atlas references texture
+            atlas.AddReferenceBy(texture); // texture references atlas (closes the cycle)
+
+            var chains = AddressablesProfilerDetailsDataInspector.CollectAddressableReferenceChains(texture);
+
+            // Reaching this line at all proves the walk terminates. The atlas is the one
+            // addressable referrer, reached directly.
+            Assert.AreEqual(1, chains.Count);
+            Assert.AreEqual(1, chains[0].Length);
+            Assert.AreSame(atlas, chains[0][0]);
+        }
+
+        [Test]
+        public void Test_CollectAddressableReferenceChains_DoesNotRouteThroughInspectedAsset()
+        {
+            // Selected texture has both a cyclic parent (its atlas) and an unrelated direct
+            // referrer (prefab B). The walk must not thread B "through" the texture/atlas.
+            var texture = MakeAsset("texture", 0);
+            var atlas = MakeAsset("atlas", 1);
+            var b = MakeAsset("B", 1);
+
+            texture.AddReferenceBy(b);     // B references texture (directly, not via atlas)
+            texture.AddReferenceBy(atlas); // atlas references texture
+            atlas.AddReferenceBy(texture); // texture references atlas (cycle)
+
+            var chains = AddressablesProfilerDetailsDataInspector.CollectAddressableReferenceChains(texture);
+
+            // Exactly the two true referrers, each reached directly; no chain passes back
+            // through the inspected texture.
+            Assert.AreEqual(2, chains.Count);
+            var leaves = new HashSet<ContentData>();
+            foreach (var chain in chains)
+            {
+                Assert.AreEqual(1, chain.Length, "referrer should be reached directly, not routed through the selection");
+                foreach (var node in chain)
+                    Assert.AreNotSame(texture, node, "walk must not traverse back through the inspected asset");
+                leaves.Add(chain[0]);
+            }
+            Assert.IsTrue(leaves.Contains(atlas));
+            Assert.IsTrue(leaves.Contains(b));
         }
     }
 }

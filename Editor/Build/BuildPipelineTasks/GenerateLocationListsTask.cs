@@ -268,6 +268,13 @@ namespace UnityEditor.AddressableAssets.Build.BuildPipelineTasks
             // Create a location for each bundle
             foreach (BundleEntry bEntry in bundleToEntry.Values)
             {
+                var bundledSchema = bEntry.Group.GetSchema<BundledAssetGroupSchema>();
+                if (bundledSchema == null || !bundledSchema.IsEnabled)
+                {
+                    throw new Exception($"AssetBundle {bEntry.BundleName} is associated with group {bEntry.Group.name} which does not have a Bundled Asset Group Schema, or the schema is disabled. Cannot build Addressables with this configuration. " +
+                        $"You can add a Content Packing and Loading schema to this group. If this is a builtinassets or monoscripts .bundle file you can change the associated Group in the AddressableAssetSettings -> Shared Bundle Settings. ");
+                }
+
                 string bundleProvider = GetBundleProviderName(bEntry.Group);
                 string bundleInternalId = GetLoadPath(bEntry.Group, bEntry.BundleName, input.Target);
                 locations.Add(new ContentCatalogDataEntry(typeof(IAssetBundleResource), bundleInternalId, bundleProvider, new object[] {bEntry.BundleName}));
@@ -283,6 +290,8 @@ namespace UnityEditor.AddressableAssets.Build.BuildPipelineTasks
                 {
                     string assetProvider = GetAssetProviderName(bEntry.Group);
                     var schema = bEntry.Group.GetSchema<BundledAssetGroupSchema>();
+                    if (schema == null || !schema.IsEnabled)
+                        continue;
 
                     // Sort assets by GUID when using Dynamic naming mode to ensure consistent internal ID generation
                     List<GUID> assetsToProcess = bEntry.Assets;
@@ -298,7 +307,8 @@ namespace UnityEditor.AddressableAssets.Build.BuildPipelineTasks
                         {
                             int indexAddedStart = locations.Count;
                             entry.CreateCatalogEntries(locations, true, assetProvider, bEntry.ExpandedDependencies.Select(x => x.BundleName), null, input.AssetToAssetInfo, providerTypes,
-                                schema.IncludeAddressInCatalog, schema.IncludeGUIDInCatalog, schema.IncludeLabelsInCatalog, bEntry.AssetInternalIds);
+                                schema.IncludeAddressInCatalog, schema.IncludeGUIDInCatalog, schema.IncludeLabelsInCatalog, bEntry.AssetInternalIds,
+                                schema.IncludeFolderKeysInCatalog, schema.IncludeAddressesForFolderChildren);
                             if (indexAddedStart < locations.Count)
                                 guidToLocation.Add(assetGUID, locations.GetRange(indexAddedStart, locations.Count - indexAddedStart));
                         }
@@ -315,26 +325,46 @@ namespace UnityEditor.AddressableAssets.Build.BuildPipelineTasks
             output.GuidToLocation = guidToLocation;
             output.ProviderTypes = providerTypes;
             output.AssetGroupToBundles = assetGroupToBundles;
-            output.BundleToImmediateBundleDependencies = bundleToEntry.Values.ToDictionary(x => x.BundleName, x => x.Dependencies.Select(y => y.BundleName).ToList());
-            output.BundleToExpandedBundleDependencies =
-                bundleToEntry.Values.ToDictionary(x => x.BundleName, x => x.ExpandedDependencies.Where(y => !x.Dependencies.Contains(y)).Select(y => y.BundleName).ToList());
+            var immediateDeps = new Dictionary<string, List<string>>(bundleToEntry.Count);
+            var expandedDeps = new Dictionary<string, List<string>>(bundleToEntry.Count);
+            foreach (BundleEntry bEntry in bundleToEntry.Values)
+            {
+                var immediate = new List<string>(bEntry.Dependencies.Count);
+                foreach (BundleEntry dep in bEntry.Dependencies)
+                    immediate.Add(dep.BundleName);
+                immediateDeps[bEntry.BundleName] = immediate;
+
+                var expanded = new List<string>(bEntry.ExpandedDependencies.Count);
+                foreach (BundleEntry dep in bEntry.ExpandedDependencies)
+                    if (!bEntry.Dependencies.Contains(dep))
+                        expanded.Add(dep.BundleName);
+                expandedDeps[bEntry.BundleName] = expanded;
+            }
+            output.BundleToImmediateBundleDependencies = immediateDeps;
+            output.BundleToExpandedBundleDependencies = expandedDeps;
             return output;
         }
 
         internal static string GetBundleProviderName(AddressableAssetGroup group)
         {
-            return group.GetSchema<BundledAssetGroupSchema>().GetBundleCachedProviderId();
+            var schema = group.GetSchema<BundledAssetGroupSchema>();
+            if (schema == null || !schema.IsEnabled)
+                return null;
+            return schema.GetBundleCachedProviderId();
         }
 
         internal static string GetAssetProviderName(AddressableAssetGroup group)
         {
-            return group.GetSchema<BundledAssetGroupSchema>().GetAssetCachedProviderId();
+            var schema = group.GetSchema<BundledAssetGroupSchema>();
+            if (schema == null || !schema.IsEnabled)
+                return null;
+            return schema.GetAssetCachedProviderId();
         }
 
         internal static string GetLoadPath(AddressableAssetGroup group, string name, BuildTarget target)
         {
             var bagSchema = group.GetSchema<BundledAssetGroupSchema>();
-            if (bagSchema == null || bagSchema.LoadPath == null)
+            if (bagSchema == null || !bagSchema.IsEnabled || bagSchema.LoadPath == null)
             {
                 Debug.LogError("Unable to determine load path for " + name + ".");
                 return string.Empty;

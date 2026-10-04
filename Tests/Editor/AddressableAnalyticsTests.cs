@@ -131,7 +131,7 @@ namespace Tests.Editor
             result.Error = err;
             for (int i = 0; i < bundleCount; i++)
             {
-                result.m_AssetBundleBuildResults.Add(null);
+                result.AssetBundleBuildResults.Add(null);
             }
 
             return result;
@@ -370,5 +370,122 @@ namespace Tests.Editor
             Assert.AreEqual(-1, (int)AddressableAnalytics.AnalyticsContentUpdateRestriction.NotApplicable,
                 "For non applicable data events, the AnalyticsContentUpdateRestriction enum should correspond to -1");
         }
+
+        // This test is just to lock down behavior, please do not make any changes that would lead to this test failing as it will break analytics!
+        // The analytics platform relies on each of these values being what they are, and any changes will lead to discontinuity in the data.
+        [Test]
+        public void EnsureArchivingStatusEnumValuesAreStable()
+        {
+            Assert.AreEqual(-1, (int)AddressableAnalytics.ArchivingStatus.Inconclusive,
+                "ArchivingStatus.Inconclusive must correspond to -1 for consistency with the analytics platform.");
+            Assert.AreEqual(0, (int)AddressableAnalytics.ArchivingStatus.Disabled,
+                "ArchivingStatus.Disabled must correspond to 0 for consistency with the analytics platform.");
+            Assert.AreEqual(1, (int)AddressableAnalytics.ArchivingStatus.Enabled,
+                "ArchivingStatus.Enabled must correspond to 1 for consistency with the analytics platform.");
+        }
+
+        [Test]
+        public void GenerateBuildData_DuplicatedAssetCountIsRealCountOrUnavailableSentinel()
+        {
+            builderInput.IsBuildAndRelease = false;
+            builderInput.IsContentUpdateBuild = false;
+            var buildData = AddressableAnalytics.GenerateBuildData(builderInput, CreateTestResult(0, false, null), AddressableAnalytics.BuildType.Inconclusive);
+
+            // The count is read from the build layout report when one exists (a real count >= 0), and falls
+            // back to the -1 "unavailable" sentinel otherwise. Whether a layout exists depends on prior builds
+            // in the project, so assert only the contract: never an uninitialized/garbage value.
+            Assert.GreaterOrEqual(buildData.NumberOfDuplicatedAssets, -1,
+                "NumberOfDuplicatedAssets should be a real count (>= 0) when a build layout exists, or -1 when unavailable.");
+        }
+
+#if ENABLE_CONTENT_DIRECTORIES
+        [Test]
+        public void GenerateBuildData_CountsOnlyEnabledContentDirectoryGroups()
+        {
+            var enabledGroup = testSettings.CreateGroup("AnalyticsCDEnabled", false, false, false, null, typeof(ContentDirectoryGroupSchema));
+            var disabledGroup = testSettings.CreateGroup("AnalyticsCDDisabled", false, false, false, null, typeof(ContentDirectoryGroupSchema));
+            try
+            {
+                enabledGroup.GetSchema<ContentDirectoryGroupSchema>().IsEnabled = true;
+                disabledGroup.GetSchema<ContentDirectoryGroupSchema>().IsEnabled = false;
+
+                builderInput.IsBuildAndRelease = false;
+                builderInput.IsContentUpdateBuild = false;
+                var buildData = AddressableAnalytics.GenerateBuildData(builderInput, CreateTestResult(0, false, null), AddressableAnalytics.BuildType.Inconclusive);
+
+                Assert.AreEqual(1, buildData.NumberOfContentDirectoryGroups,
+                    "NumberOfContentDirectoryGroups should count only groups whose ContentDirectoryGroupSchema is enabled.");
+            }
+            finally
+            {
+                testSettings.RemoveGroup(enabledGroup);
+                testSettings.RemoveGroup(disabledGroup);
+            }
+        }
+
+        [Test]
+        public void GenerateBuildData_SerializedFileCountIsZeroWhenNoContentDirectoryResults()
+        {
+            builderInput.IsBuildAndRelease = false;
+            builderInput.IsContentUpdateBuild = false;
+            var buildData = AddressableAnalytics.GenerateBuildData(builderInput, CreateTestResult(0, false, null), AddressableAnalytics.BuildType.Inconclusive);
+
+            Assert.AreEqual(0, buildData.NumberOfSerializedFiles,
+                "NumberOfSerializedFiles should be 0 when the build result carries no content directory results to sum.");
+        }
+
+        [TestCase(ContentDirectoryArchiveMode.None, false)]
+        [TestCase(ContentDirectoryArchiveMode.Uncompressed, true)]
+        [TestCase(ContentDirectoryArchiveMode.Lz4, true)]
+        public void GenerateBuildData_ArchivingEnabledReflectsSetting(ContentDirectoryArchiveMode archiveMode, bool expectedEnabled)
+        {
+            var originalArchiveMode = testSettings.ContentDirectoryArchiveMode;
+            try
+            {
+                testSettings.ContentDirectoryArchiveMode = archiveMode;
+                var data = AddressableAnalytics.GenerateBuildData(builderInput, CreateTestResult(0, false, null), AddressableAnalytics.BuildType.Inconclusive);
+                int expected = expectedEnabled
+                    ? (int)AddressableAnalytics.ArchivingStatus.Enabled
+                    : (int)AddressableAnalytics.ArchivingStatus.Disabled;
+                Assert.AreEqual(expected, data.ArchivingEnabled,
+                    $"ArchivingEnabled should reflect whether ContentDirectoryArchiveMode {archiveMode} archives content.");
+            }
+            finally
+            {
+                testSettings.ContentDirectoryArchiveMode = originalArchiveMode;
+            }
+        }
+
+        [Test]
+        public void GenerateBuildData_ArchiveSizeIsTrackedOnlyWhenArchivingEnabled()
+        {
+            var originalArchiveMode = testSettings.ContentDirectoryArchiveMode;
+            var originalArchiveSize = testSettings.TargetArchiveSizeInMB;
+            try
+            {
+                testSettings.TargetArchiveSizeInMB = 512f;
+
+                testSettings.ContentDirectoryArchiveMode = ContentDirectoryArchiveMode.Lz4;
+                var lz4Data = AddressableAnalytics.GenerateBuildData(builderInput, CreateTestResult(0, false, null), AddressableAnalytics.BuildType.Inconclusive);
+                Assert.AreEqual(512f, lz4Data.ArchiveSize,
+                    "ArchiveSize should report TargetArchiveSizeInMB for the Lz4 archive mode.");
+
+                testSettings.ContentDirectoryArchiveMode = ContentDirectoryArchiveMode.Uncompressed;
+                var uncompressedData = AddressableAnalytics.GenerateBuildData(builderInput, CreateTestResult(0, false, null), AddressableAnalytics.BuildType.Inconclusive);
+                Assert.AreEqual(512f, uncompressedData.ArchiveSize,
+                    "ArchiveSize should report TargetArchiveSizeInMB for the Uncompressed archive mode.");
+
+                testSettings.ContentDirectoryArchiveMode = ContentDirectoryArchiveMode.None;
+                var disabledData = AddressableAnalytics.GenerateBuildData(builderInput, CreateTestResult(0, false, null), AddressableAnalytics.BuildType.Inconclusive);
+                Assert.AreEqual(-1f, disabledData.ArchiveSize,
+                    "ArchiveSize should be -1 (untracked) when archiving is disabled, regardless of TargetArchiveSizeInMB.");
+            }
+            finally
+            {
+                testSettings.ContentDirectoryArchiveMode = originalArchiveMode;
+                testSettings.TargetArchiveSizeInMB = originalArchiveSize;
+            }
+        }
+#endif
     }
 }

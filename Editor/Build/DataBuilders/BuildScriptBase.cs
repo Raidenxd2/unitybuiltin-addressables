@@ -1,23 +1,23 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-#if UNITY_2022_2_OR_NEWER
+using UnityEditor.AddressableAssets.Build.BuildPipelineTasks;
 using UnityEditor.AddressableAssets.BuildReportVisualizer;
-#endif
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
+#if ENABLE_BUILD_HISTORY_EXTERNAL_BUILDS
+using UnityEditor.Build;
+#endif
 using UnityEditor.Build.Pipeline.Interfaces;
 using UnityEditor.Build.Pipeline.Utilities;
-using UnityEditor.Experimental;
 using UnityEngine;
+using UnityEditor.AddressableAssets.Build.CatalogBuilders;
+using UnityEditor.AddressableAssets.Build.Layout;
 using UnityEngine.AddressableAssets;
 using UnityEngine.AddressableAssets.Initialization;
-using UnityEngine.AddressableAssets.ResourceLocators;
 using UnityEngine.ResourceManagement.ResourceProviders;
 using UnityEngine.ResourceManagement.Util;
 using UnityEngine.Serialization;
-using System.Reflection;
 
 
 namespace UnityEditor.AddressableAssets.Build.DataBuilders
@@ -37,14 +37,14 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         /// </summary>
         [FormerlySerializedAs("m_InstanceProviderType")]
         [SerializedTypeRestrictionAttribute(type = typeof(IInstanceProvider))]
-        public SerializedType instanceProviderType = new SerializedType() { Value = typeof(InstanceProvider) };
+        protected internal SerializedType instanceProviderType = new SerializedType() { Value = typeof(InstanceProvider) };
 
         /// <summary>
         /// The type of scene provider to create for the addressables system.
         /// </summary>
         [FormerlySerializedAs("m_SceneProviderType")]
         [SerializedTypeRestrictionAttribute(type = typeof(ISceneProvider))]
-        public SerializedType sceneProviderType = new SerializedType() { Value = typeof(SceneProvider) };
+        protected internal SerializedType sceneProviderType = new SerializedType() { Value = typeof(SceneProvider) };
 
         /// <summary>
         /// Stores the logged information of all the build tasks.
@@ -52,6 +52,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         public IBuildLogger Log
         {
             get { return m_Log; }
+            protected set { m_Log = value; }
         }
 
         [NonSerialized]
@@ -65,12 +66,46 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
             get { return "Undefined"; }
         }
 
-        internal static void WriteBuildLog(BuildLog log, string directory)
+        internal static void WriteBuildLog(IBuildLogger log, string directory)
         {
+            if (!(log is ILogTEP tepLogger))
+            {
+                return;
+            }
             Directory.CreateDirectory(directory);
             PackageManager.PackageInfo info = PackageManager.PackageInfo.FindForAssembly(typeof(BuildScriptBase).Assembly);
-            log.AddMetaData(info.name, info.version);
-            File.WriteAllText(Path.Combine(directory, "AddressablesBuildTEP.json"), log.FormatForTraceEventProfiler());
+            tepLogger.AddMetaData(info.name, info.version);
+            var tepPath = Path.Combine(directory, BuildReportUtility.TepFileName);
+            File.WriteAllText(tepPath, tepLogger.FormatForTraceEventProfiler());
+
+            if (!ProjectConfigData.GenerateBuildLayout || ProjectConfigData.BuildLayoutReportFileFormat == ProjectConfigData.ReportFileFormat.TXT)
+            {
+                return;
+            }
+            var buildLayoutPath = BuildLayoutGenerationTask.GetLayoutFilePathForFormat(ProjectConfigData.BuildLayoutReportFileFormat);
+            if (!File.Exists(buildLayoutPath))
+            {
+                Debug.Log($"Missing expected build layout {buildLayoutPath}; skipping copying TEP to BuildReport directory");
+                return;
+            }
+            var layoutHeader = BuildLayout.Open(buildLayoutPath, true, false);
+#if ENABLE_BUILD_HISTORY_EXTERNAL_BUILDS
+            if (BuildHistory.TryGetBuildReportDirectory(layoutHeader.AddressablesBuildSessionGUID, out string buildReportTepDirectory))
+                AddressablesBuildHistorySupport.TryCopyTep(tepPath, buildReportTepDirectory);
+#endif
+            var buildStart = layoutHeader.BuildStart;
+            var timestampedLayoutPath = GetLayoutTEPFilePath(buildStart);
+            // Re-entering Play Mode reuses the same build layout report, so
+            // BuildStart (and therefore this filename) can repeat. Skip the
+            // copy instead of throwing IOException when it already exists.
+            if (!File.Exists(timestampedLayoutPath))
+                File.Copy(tepPath, timestampedLayoutPath);
+        }
+
+        internal static string GetLayoutTEPFilePath(DateTime buildStart)
+        {
+            string stringNow = string.Format("{0:D4}.{1:D2}.{2:D2}.{3:D2}.{4:D2}.{5:D2}", buildStart.Year, buildStart.Month, buildStart.Day, buildStart.Hour, buildStart.Minute, buildStart.Second);
+            return $"{Addressables.BuildReportPath}buildlayoutTEP_{stringNow}.json";
         }
 
         /// <summary>
@@ -90,7 +125,10 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
             }
 
             AddressableAnalytics.BuildType buildType = AddressableAnalytics.DetermineBuildType();
-            m_Log = (builderInput.Logger != null) ? builderInput.Logger : new BuildLog();
+            if (builderInput.Logger == null)
+                builderInput.Logger = new BuildLog();
+
+            m_Log = builderInput.Logger;
 
             AddressablesRuntimeProperties.ClearCachedPropertyValues();
 
@@ -100,7 +138,25 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
             {
                 try
                 {
-                    result = BuildDataImplementation<TResult>(builderInput);
+                    // A nested build - a custom script calling another builder with the same
+                    // input - reuses this enumerator, so it keeps the warm tree and does not
+                    // subscribe to the change events twice. Only the creator disposes it.
+                    bool ownsEnumerator = builderInput.FolderEnumerator == null;
+                    if (ownsEnumerator)
+                        builderInput.FolderEnumerator = new AddressableFolderEnumerator(builderInput.AddressableSettings, false, m_Log,
+                            watchForChanges: true);
+                    try
+                    {
+                        result = BuildDataImplementation<TResult>(builderInput);
+                    }
+                    finally
+                    {
+                        if (ownsEnumerator)
+                        {
+                            builderInput.FolderEnumerator.Dispose();
+                            builderInput.FolderEnumerator = null;
+                        }
+                    }
                 }
                 catch (Exception e)
                 {
@@ -110,7 +166,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                     else
                         errMessage = e.Message;
 
-                    Debug.LogError(errMessage);
+                    Debug.LogException(e);
                     return AddressableAssetBuildResult.CreateResult<TResult>(null, 0, errMessage);
                 }
 
@@ -118,8 +174,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                     result.FileRegistry = builderInput.Registry;
             }
 
-            if (builderInput.Logger == null && m_Log != null)
-                WriteBuildLog((BuildLog)m_Log, Path.GetDirectoryName(Application.dataPath) + "/" + Addressables.LibraryPath);
+            WriteBuildLog(m_Log, Path.GetDirectoryName(Application.dataPath) + "/" + Addressables.LibraryPath);
 
             if (result is AddressableAssetBuildResult)
             {
@@ -157,24 +212,36 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                     return "No groups found to process in build script " + Name;
                 }
 
+                var checkCDError = PreProcessContentDirectoryGroups(aaContext);
+                if (!string.IsNullOrEmpty(checkCDError))
+                {
+                    return checkCDError;
+                }
+
                 //intentionally for not foreach so groups can be added mid-loop.
                 for (int index = 0; index < aaContext.Settings.groups.Count; index++)
                 {
                     AddressableAssetGroup assetGroup = aaContext.Settings.groups[index];
-                    if (assetGroup == null)
+                    if (assetGroup == null || !assetGroup.IncludeInBuild)
                         continue;
 
-                    var error = ErrorCheckBundleSettings(assetGroup, aaContext);
-                    if (error != string.Empty)
+                    using (Log.ScopedStep(LogLevel.Verbose, "ProcessGroup",
+                           ("Name", assetGroup.Name),
+                           ("Guid", assetGroup.Guid)))
                     {
-                        return error;
-                    }
 
-                    EditorUtility.DisplayProgressBar($"Processing Addressable Group", assetGroup.Name, (float)index / aaContext.Settings.groups.Count);
-                    var errorString = ProcessGroup(assetGroup, aaContext);
-                    if (!string.IsNullOrEmpty(errorString))
-                    {
-                        return errorString;
+                        var error = ErrorCheckBundleSettings(assetGroup, aaContext);
+                        if (error != string.Empty)
+                        {
+                            return error;
+                        }
+
+                        EditorUtility.DisplayProgressBar($"Processing Addressable Group", assetGroup.Name, (float)index / aaContext.Settings.groups.Count);
+                        var errorString = ProcessGroup(assetGroup, aaContext);
+                        if (!string.IsNullOrEmpty(errorString))
+                        {
+                            return errorString;
+                        }
                     }
                 }
             }
@@ -183,6 +250,35 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                 EditorUtility.ClearProgressBar();
             }
 
+            return string.Empty;
+        }
+
+        // Validates the Build/Load Paths of all included, enabled Content Directory groups before processing.
+        //  - All enabled groups must share the same Build Path (different build paths aren't supported yet).
+        //  - Load Paths cannot point to a remote location (only local content is supported).
+        // Once those are supported, this validation can be pulled out.
+        internal static string PreProcessContentDirectoryGroups(AddressableAssetsBuildContext aaContext)
+        {
+            string buildPath = "";
+            foreach (var group in aaContext.Settings.groups)
+            {
+                if (group == null || !group.IncludeInBuild)
+                    continue;
+
+                var schema = group.GetSchema<ContentDirectoryGroupSchema>();
+                if (schema == null || !schema.IsEnabled)
+                    continue;
+
+                string currentBuildPath = schema.BuildPath.GetValue(aaContext.Settings);
+                if (string.IsNullOrEmpty(buildPath))
+                    buildPath = currentBuildPath;
+                else if (currentBuildPath != buildPath)
+                    return $"Currently, all Content Directory Groups must share the same Build Path. Group '{group.Name}' has a different Build Path.";
+
+                string loadPath = schema.LoadPath.GetValue(aaContext.Settings);
+                if (ResourceManagerConfig.IsPathRemote(loadPath))
+                    return $"Currently, all Content Directory Groups only support local content. Change the Load Path of Group '{group.Name}' to resolve.";
+            }
             return string.Empty;
         }
 
@@ -200,12 +296,14 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
 
         internal static string ErrorCheckBundleSettings(AddressableAssetGroup assetGroup, AddressableAssetsBuildContext aaContext)
         {
-            if (!assetGroup.HasSchema<BundledAssetGroupSchema>())
+            if (!assetGroup.IncludeInBuild || !assetGroup.HasSchema<BundledAssetGroupSchema>())
                 return string.Empty;
 
             var message = string.Empty;
             var settings = aaContext.Settings;
             var schema = assetGroup.GetSchema<BundledAssetGroupSchema>();
+            if (schema == null || !schema.IsEnabled)
+                return string.Empty;
 
             if (settings.UseUnityWebRequestForLocalBundles && schema.StripDownloadOptions)
             {
@@ -289,23 +387,10 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         /// <param name="content">The content of the file.</param>
         /// <param name="registry">The file registry used to track all produced artifacts.</param>
         /// <returns>True if the file was written.</returns>
+        [Obsolete("Use FileRegistry.WriteAndAddFile instead.")]
         protected internal static bool WriteFile(string path, byte[] content, FileRegistry registry)
         {
-            try
-            {
-                registry.AddFile(path);
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-                File.WriteAllBytes(path, content);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Debug.LogException(ex);
-                registry.RemoveFile(path);
-                return false;
-            }
+            return registry.WriteAndAddFile(path, content);
         }
 
         /// <summary>
@@ -315,23 +400,10 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         /// <param name="content">The content of the file.</param>
         /// <param name="registry">The file registry used to track all produced artifacts.</param>
         /// <returns>True if the file was written.</returns>
+        [Obsolete("Use FileRegistry.WriteAndAddFile instead.")]
         protected static bool WriteFile(string path, string content, FileRegistry registry)
         {
-            try
-            {
-                registry.AddFile(path);
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-                File.WriteAllText(path, content);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Debug.LogException(ex);
-                registry.RemoveFile(path);
-                return false;
-            }
+            return registry.WriteAndAddFile(path, content);
         }
 
         /// <summary>
@@ -359,7 +431,21 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         /// <param name="contentStatePath">Destination location of the content state file.</param>
         /// <param name="builderInput">The builderInput object used in the build.</param>
         /// <param name="addrResult">The build data result.</param>
+        [Obsolete("Use CopyAndRegisterContentState(string, string, FileRegistry, AddressablesPlayerBuildResult)")]
         public virtual void CopyAndRegisterContentState(string tempPath, string contentStatePath, AddressablesDataBuilderInput builderInput, AddressablesPlayerBuildResult addrResult)
+        {
+            CopyAndRegisterContentState(tempPath, contentStatePath, builderInput.Registry, addrResult);
+        }
+
+        /// <summary>
+        /// Copies the content state binary file from the temp directory to its final location and registers it in the
+        /// file registry and build results.
+        /// </summary>
+        /// <param name="tempPath">Temporary location of the content state file.</param>
+        /// <param name="contentStatePath">Destination location of the content state file.</param>
+        /// <param name="fileRegistry">The file registry used to track all produced artifacts.</param>
+        /// <param name="addrResult">The build data result.</param>
+        public virtual void CopyAndRegisterContentState(string tempPath, string contentStatePath, FileRegistry fileRegistry, AddressablesPlayerBuildResult addrResult)
         {
             try
             {
@@ -372,7 +458,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                 File.Copy(tempPath, contentStatePath, true);
                 if (addrResult != null)
                     addrResult.ContentStateFilePath = contentStatePath;
-                builderInput.Registry.AddFile(contentStatePath);
+                fileRegistry.AddFile(contentStatePath);
             }
             catch (UnauthorizedAccessException uae)
             {
@@ -393,27 +479,33 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         /// </summary>
         protected virtual void NotifyUserAboutBuildReport()
         {
-            bool buildReportSettingCheck = ProjectConfigData.UserHasBeenInformedAboutBuildReportSettingPreBuild;
-            if (!buildReportSettingCheck && !Application.isBatchMode && !ProjectConfigData.GenerateBuildLayout)
+            using (Log.ScopedStep(LogLevel.Info, "NotifyUserAboutBuildReport"))
             {
-                bool turnOnBuildLayout = EditorUtility.DisplayDialog("Addressables Build Report",
-                    "There's a new Addressables Build Report you can check out after your content build.  " +
-                    "However, this requires that 'Debug Build Layout' is turned on.  The setting can be found in Edit > Preferences > Addressables.  Would you like to turn it on?",
-                    "Yes", "No");
-                if (turnOnBuildLayout)
-                    ProjectConfigData.GenerateBuildLayout = true;
-                ProjectConfigData.UserHasBeenInformedAboutBuildReportSettingPreBuild = true;
+                bool buildReportSettingCheck = ProjectConfigData.UserHasBeenInformedAboutBuildReportSettingPreBuild;
+                if (!buildReportSettingCheck && !Application.isBatchMode && !ProjectConfigData.GenerateBuildLayout)
+                {
+                    bool turnOnBuildLayout = EditorUtility.DisplayDialog("Addressables Build Report",
+                        "There's a new Addressables Build Report you can check out after your content build.  " +
+                        "However, this requires that 'Debug Build Layout' is turned on.  The setting can be found in Edit > Preferences > Addressables.  Would you like to turn it on?",
+                        "Yes", "No");
+                    if (turnOnBuildLayout)
+                        ProjectConfigData.GenerateBuildLayout = true;
+                    ProjectConfigData.UserHasBeenInformedAboutBuildReportSettingPreBuild = true;
+                }
             }
         }
 
         /// <summary>
-        /// Displays the Addressables Report window
+        /// Displays the build report for the build that just finished.
         /// </summary>
         protected virtual void DisplayBuildReport()
         {
             if (!Application.isBatchMode && ProjectConfigData.AutoOpenAddressablesReport && ProjectConfigData.GenerateBuildLayout)
             {
-                BuildReportWindow.ShowWindowAfterBuild();
+                using (Log.ScopedStep(LogLevel.Info, "DisplayBuildReport"))
+                {
+                    BuildReportUtility.ShowBuildReportWindow();
+                }
             }
         }
 
@@ -423,8 +515,27 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         /// <param name="groups">A list of groups that were built</param>
         protected virtual void ClearContentUpdateNotifications(List<AddressableAssetGroup> groups)
         {
-            foreach (var group in groups)
-                ContentUpdateScript.ClearContentUpdateNotifications(group);
+            using(m_Log.ScopedStep(LogLevel.Info, "ClearContentUpdateNotifications"))
+            {
+                foreach (var group in groups)
+                    ContentUpdateScript.ClearContentUpdateNotifications(group);
+            }
+        }
+
+        /// <summary>
+        /// Creates the <see cref="ICatalogBuilder"/> used to write catalog files during a build.
+        /// Override this method in a derived build script to supply a custom catalog builder.
+        /// </summary>
+        /// <param name="settings">The settings object whose catalog provider type determines the builder to create.</param>
+        /// <returns>The <see cref="ICatalogBuilder"/> to use when writing catalog files.</returns>
+        protected virtual ICatalogBuilder CreateCatalogBuilder(AddressableAssetSettings settings)
+        {
+            var providerType = settings.CatalogProviderType;
+            if (providerType == null)
+                throw new InvalidOperationException(
+                    "No Catalog Provider is configured in Addressable Asset Settings. " +
+                    "Open the Addressables Settings inspector and select a provider from the 'Catalog Provider' dropdown.");
+            return BaseCatalogBuilder.CreateForProvider(providerType);
         }
     }
 }

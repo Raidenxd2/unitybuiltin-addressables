@@ -1,5 +1,6 @@
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.Build.Pipeline.Interfaces;
+using UnityEditor.Build.Pipeline.Utilities;
 using UnityEngine;
 
 namespace UnityEditor.AddressableAssets.Build
@@ -57,12 +58,8 @@ namespace UnityEditor.AddressableAssets.Build
         /// <summary>
         /// The name of the default Runtime Catalog file.
         /// </summary>
-        public string RuntimeCatalogFilename =
-#if ENABLE_JSON_CATALOG
-           "catalog.json";
-#else
-            "catalog.bin";
-#endif
+        public string RuntimeCatalogFilename = "catalog";
+
         /// <summary>
         /// The asset content state of a previous build.  This allows detection of deltas with the current build content state.  This will be
         /// null in standard builds.  This is only set during content update builds.
@@ -181,6 +178,11 @@ namespace UnityEditor.AddressableAssets.Build
         internal bool IsBuildAndRelease = false;
         internal bool IsContentUpdateBuild = false;
 
-        internal IBuildLogger Logger { get; set; }
+        /// <summary>
+        /// The logger used to record build diagnostics and warnings during an Addressables build.
+        /// </summary>
+        public IBuildLogger Logger { get; internal set; }
+
+        internal AddressableFolderEnumerator FolderEnumerator;
     }
 }

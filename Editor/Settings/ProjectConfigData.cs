@@ -10,6 +10,7 @@ using System.Runtime.Serialization.Formatters.Binary;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.Serialization;
+using static UnityEngine.AddressableAssets.ResourceLocators.BinaryContentCatalogData.ResourceLocator.ResourceLocation.Serializer;
 
 namespace UnityEditor.AddressableAssets.Settings
 {
@@ -101,6 +102,11 @@ namespace UnityEditor.AddressableAssets.Settings
             [DataMember]
 #endif
             internal bool userHasBeenInformedAboutNestedFolderStructure = false;
+            [SerializeField]
+#if UNITY_6000_0_OR_NEWER
+            [DataMember]
+#endif
+            internal bool userHasSeenContentDirectoryAnnouncement = false;
         }
 
         static ConfigSaveData s_Data;
@@ -216,6 +222,24 @@ namespace UnityEditor.AddressableAssets.Settings
             }
         }
 
+        internal static bool UserHasSeenContentDirectoryAnnouncement
+        {
+            get
+            {
+                ValidateData();
+                return s_Data.userHasSeenContentDirectoryAnnouncement;
+            }
+            set
+            {
+                ValidateData();
+                if (s_Data.userHasSeenContentDirectoryAnnouncement != value)
+                {
+                    s_Data.userHasSeenContentDirectoryAnnouncement = value;
+                    SaveData();
+                }
+            }
+        }
+
         /// <summary>
         /// File formats supported for the bundle build layout report.
         /// </summary>
@@ -279,10 +303,12 @@ namespace UnityEditor.AddressableAssets.Settings
         /// <summary>
         /// Removes the build report at index from the list of build reports shown in the Build Reports window
         /// </summary>
-        /// <param name="index">The index of the build report to be removed</param>
+        /// <param name="index">The index of the build report to be removed. Out of range indices are ignored.</param>
         public static void RemoveBuildReportFilePathAtIndex(int index)
         {
             ValidateData();
+            if (index < 0 || index >= s_Data.buildReports.Count)
+                return;
             s_Data.buildReports.RemoveAt(index);
             SaveData();
         }

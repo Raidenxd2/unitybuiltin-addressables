@@ -33,25 +33,24 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
         {
             UseCache = true;
             ContiguousBundles = aaSettings.ContiguousBundles;
-#if NONRECURSIVE_DEPENDENCY_DATA
             NonRecursiveDependencies = aaSettings.NonRecursiveBuilding;
-#endif
             DisableVisibleSubAssetRepresentations = aaSettings.DisableVisibleSubAssetRepresentations;
 
             m_settings = aaSettings;
             m_bundleToAssetGroup = bundleToAssetGroup;
 
             //If default group has BundledAssetGroupSchema use the compression there otherwise check if the target is webgl or not and try set the compression accordingly
+            var defaultGroupSchema = m_settings.DefaultGroup.GetSchema<BundledAssetGroupSchema>();
 #if !UNITY_WEBGL
-            if (m_settings.DefaultGroup.HasSchema<BundledAssetGroupSchema>())
-                BundleCompression = ConverBundleCompressiontToBuildCompression(m_settings.DefaultGroup.GetSchema<BundledAssetGroupSchema>().Compression);
+            if (m_settings.DefaultGroup.HasSchema<BundledAssetGroupSchema>() && defaultGroupSchema != null && defaultGroupSchema.IsEnabled)
+                BundleCompression = ConverBundleCompressiontToBuildCompression(defaultGroupSchema.Compression);
             else
                 BundleCompression = target == BuildTarget.WebGL ? BuildCompression.LZ4Runtime : BuildCompression.LZMA;
 #else
             BundleCompression = BuildCompression.LZ4Runtime;
 #endif
 
-            if (aaSettings.StripUnityVersionFromBundleBuild)
+            if (aaSettings.StripUnityVersion)
                 ContentBuildFlags |= ContentBuildFlags.StripUnityVersion;
         }
 
@@ -114,8 +113,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
                 if (group != null)
                 {
                     var abSchema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (abSchema != null)
-                    {
+                    if (abSchema != null && abSchema.IsEnabled)
 #if !UNITY_WEBGL
                         return abSchema.GetBuildCompressionForBundle(identifier);
 #else
@@ -123,7 +121,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
 #endif
                     }
                     else
-                        Debug.LogWarningFormat("Bundle group {0} does not have BundledAssetGroupSchema.", group.name);
+                        Debug.LogWarningFormat("Bundle group {0} does not have an enabled BundledAssetGroupSchema.", group.name);
                 }
                 else
                 {

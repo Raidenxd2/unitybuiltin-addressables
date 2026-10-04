@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEditor.AddressableAssets.Build.Layout;
+using UnityEditor.AddressableAssets.Settings;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -13,7 +14,8 @@ namespace UnityEditor.AddressableAssets.BuildReportVisualizer
         public VisualElement tabRootElement;
         internal ScrollView scrollbarElement;
 
-        BuildReportWindow m_Window;
+        IBuildReportHost m_Host;
+        bool m_IsEmbedded;
 
         class SummaryRow
         {
@@ -48,10 +50,11 @@ namespace UnityEditor.AddressableAssets.BuildReportVisualizer
 
         BuildReportHelperConsumer m_HelperConsumer;
 
-        internal MainPanelSummaryTab(BuildReportWindow window, BuildReportHelperConsumer helperConsumer)
+        internal MainPanelSummaryTab(IBuildReportHost host, BuildReportHelperConsumer helperConsumer, bool isEmbedded)
         {
             m_HelperConsumer = helperConsumer;
-            m_Window = window;
+            m_Host = host;
+            m_IsEmbedded = isEmbedded;
         }
 
         public void Consume(BuildLayout buildReport)
@@ -77,6 +80,12 @@ namespace UnityEditor.AddressableAssets.BuildReportVisualizer
                     localCatalogNames.Add(catalogFileName);
             }
 
+#if ENABLE_CONTENT_DIRECTORIES
+            // The banner links to Build Analysis; suppress it when this view is already embedded there.
+            if (!m_IsEmbedded && buildReport.ContentDirectories?.Count > 0)
+                scrollbarElement.Add(CreateContentDirectoriesBanner());
+#endif
+
             SummaryRowBuilder generalInfo = new SummaryRowBuilder("General Information");
             if (localCatalogNames.Count > 0)
                 generalInfo.With("Local Catalog(s)", string.Join(", ", localCatalogNames));
@@ -96,26 +105,20 @@ namespace UnityEditor.AddressableAssets.BuildReportVisualizer
 
             if (buildReport.DuplicatedAssets.Count > 0)
             {
-                ulong duplicatedSize = 0;
-                foreach (var dupeAsset in m_HelperConsumer.GUIDToDuplicateAssets.Values)
-                {
-                    int duplicationCount = dupeAsset.GUIDToReferencingAssets.Count;
-                    if (duplicationCount > 1)
-                        duplicatedSize += (ulong)(duplicationCount - 1) * (dupeAsset.Asset.SerializedSize + dupeAsset.Asset.StreamedSize);
-                }
+                ulong duplicatedSize = CalculateDuplicatedSize(m_HelperConsumer.GUIDToDuplicateAssets.Values);
 
                 SummaryRowBuilder duplicatedAssets = new SummaryRowBuilder("Potential Issues")
                     .With(new PotentialIssuesCard($"{buildReport.DuplicatedAssets.Count} Duplicate Assets were detected in the build.  \n\n" +
                     $"Removing duplicated Assets could result in up to {BuildReportUtility.GetDenominatedBytesString(duplicatedSize)} reduced build size.",
-                    () => m_Window.NavigateToView(BuildReportWindow.PotentialIssuesType.DuplicatedAssetsView)));
+                    () => m_Host.NavigateToView(PotentialIssuesType.DuplicatedAssetsView)));
 
                 scrollbarElement.Add(duplicatedAssets.Build());
             }
 
-            SummaryRowBuilder aggregateInfo = new SummaryRowBuilder("Aggregate Information")
+            SummaryRowBuilder aggregateInfo = new SummaryRowBuilder("Aggregate Information (AssetBundles)")
                 .With("Number of bundles", summary.BundleSummary.Count.ToString())
                 .With("Total size of all bundles", BuildReportUtility.GetDenominatedBytesString(summary.BundleSummary.TotalCompressedSize))
-                .With("Total number of assets", summary.TotalAssetCount.ToString())
+                .With("Total number of assets in AssetBundles", summary.TotalAssetCount.ToString())
                 .With("Addressables", $"{summary.ExplicitAssetCount} ({String.Format("{0:0.##}", ((float)summary.ExplicitAssetCount/(float)summary.TotalAssetCount) * 100f)}%)")
                 .With("Assets pulled into a build by an Addressable", $"{summary.ImplicitAssetCount} ({String.Format("{0:0.##}", ((float)summary.ImplicitAssetCount/(float)summary.TotalAssetCount) * 100f)}%)", FontStyle.Italic);
 
@@ -149,6 +152,38 @@ namespace UnityEditor.AddressableAssets.BuildReportVisualizer
         {
             scrollbarElement.Clear();
             scrollbarElement.visible = false;
+        }
+
+#if ENABLE_CONTENT_DIRECTORIES
+        static HelpBox CreateContentDirectoriesBanner()
+        {
+            HelpBox banner = new HelpBox("This build includes content built using Content Directories. To view that content, use the Build Analysis window.", HelpBoxMessageType.Info);
+            banner.style.marginTop = banner.style.marginLeft = banner.style.marginRight = new Length(5f, LengthUnit.Pixel);
+            banner.style.marginBottom = 0f;
+            banner.style.paddingTop = banner.style.paddingBottom = banner.style.paddingLeft = banner.style.paddingRight = new Length(5f, LengthUnit.Pixel);
+            banner.buttonText = "Open Build Analysis";
+            banner.onButtonClicked += BuildReportUtility.OpenBuildAnalysisWindow;
+            banner.linkText = "Learn More";
+            banner.linkHref = AddressableAssetUtility.GenerateContentDirectoriesDocsURL();
+
+            Label messageLabel = banner.Q<Label>(className: HelpBox.labelUssClassName);
+            if (messageLabel != null)
+                messageLabel.style.fontSize = 12f;
+
+            return banner;
+        }
+
+#endif
+
+        internal static ulong CalculateDuplicatedSize(IEnumerable<BuildReportHelperDuplicateImplicitAsset> duplicateAssets)
+        {
+            ulong duplicatedSize = 0;
+            foreach (var dupeAsset in duplicateAssets)
+            {
+                if (dupeAsset.DuplicationCount > 1)
+                    duplicatedSize += (ulong)(dupeAsset.DuplicationCount - 1) * (dupeAsset.Asset.SerializedSize + dupeAsset.Asset.StreamedSize);
+            }
+            return duplicatedSize;
         }
     }
 }

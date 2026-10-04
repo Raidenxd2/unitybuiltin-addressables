@@ -4,6 +4,7 @@ using System.Linq;
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEngine;
+using UnityEngine.ResourceManagement.Util;
 
 // ReSharper disable DelegateSubtraction
 
@@ -114,6 +115,20 @@ namespace UnityEditor.AddressableAssets.GUI
             if (m_GroupTargets == null || m_GroupTargets.Length == 0)
                 return values;
 
+            // For single selection, use display order
+            if (m_GroupTargets.Length == 1)
+            {
+                var displayOrder = m_GroupTarget.SchemaDisplayOrder;
+                for (int i = 0; i < displayOrder.Count; i++)
+                {
+                    var schema = m_GroupTarget.GetSchemaByDisplayIndex(i);
+                    if (schema != null)
+                        values.Add(schema);
+                }
+                return values;
+            }
+
+            // For multi-selection, use intersection (alphabetical order)
             values.AddRange(m_GroupTarget.Schemas);
 
             foreach (var group in m_GroupTargets)
@@ -130,7 +145,6 @@ namespace UnityEditor.AddressableAssets.GUI
             List<AddressableAssetGroupSchema> values = m_GroupTargets
                 .Where(t => t.HasSchema(schema.GetType()) && t != m_GroupTarget)
                 .Select(t => t.GetSchema(schema.GetType())).ToList();
-
             return values;
         }
 
@@ -155,6 +169,46 @@ namespace UnityEditor.AddressableAssets.GUI
 
             EditorGUILayout.EndHorizontal();
             GUILayout.Space(6);
+
+            var bundledSchema = m_GroupTarget.GetSchema(typeof(BundledAssetGroupSchema));
+            var contentDirSchema = m_GroupTarget.GetSchema<ContentDirectoryGroupSchema>();
+            bool contentDirEnabled = contentDirSchema != null && contentDirSchema.IsEnabled;
+            bool bothEnabled = bundledSchema != null && bundledSchema.IsEnabled && contentDirEnabled;
+
+            bool issueDividerDrawn = false;
+            if (contentDirEnabled)
+            {
+                string contentDirLoadPath = contentDirSchema.LoadPath.GetValue(m_GroupTarget.Settings);
+
+                if (ResourceManagerConfig.IsPathRemote(contentDirLoadPath))
+                {
+                    DrawDivider();
+                    GUILayout.Space(6);
+                    issueDividerDrawn = true;
+
+                    AddressablesGUIUtility.DrawErrorBoxWithLink(
+                        $"Currently, \"{AddressableAssetUtility.GetCachedTypeDisplayName(contentDirSchema.GetType())}\" only supports local content. Change the Load Path to resolve.",
+                        "Read more...",
+                        AddressableAssetUtility.GenerateDocsURL("group-inspector-settings-reference.html"));
+                    GUILayout.Space(6);
+                }
+            }
+
+            if (bothEnabled)
+            {
+                if (!issueDividerDrawn)
+                {
+                    DrawDivider();
+                    GUILayout.Space(6);
+                }
+
+                AddressablesGUIUtility.DrawErrorBoxWithLink(
+                    $"Cannot enable \"{AddressableAssetUtility.GetCachedTypeDisplayName(bundledSchema.GetType())}\" and \"{AddressableAssetUtility.GetCachedTypeDisplayName(contentDirSchema.GetType())}\" schemas at the same time. Disable one to resolve.",
+                    "Read more...",
+                    AddressableAssetUtility.GenerateContentDirectoriesDocsURL());
+                GUILayout.Space(6);
+            }
+
             bool doDrawDivider = false;
 
             EditorGUILayout.BeginVertical();
@@ -168,37 +222,82 @@ namespace UnityEditor.AddressableAssets.GUI
                 bool foldoutActive = AddressablesGUIUtility.GetFoldoutValue(foldoutKey);
 
                 string helpUrl = null;
-                if (schemaType == typeof(BundledAssetGroupSchema))
-                    helpUrl = AddressableAssetUtility.GenerateDocsURL("ContentPackingAndLoadingSchema.html");
+                if (schemaType == typeof(BundledAssetGroupSchema) || schemaType == typeof(ContentDirectoryGroupSchema))
+                    helpUrl = AddressableAssetUtility.GenerateDocsURL("group-inspector-settings-reference.html");
                 if (schemaType == typeof(ContentUpdateGroupSchema))
-                    helpUrl = AddressableAssetUtility.GenerateDocsURL("UpdateRestrictionSchema.html");
-                Action helpAction = () => { Application.OpenURL(helpUrl); };
+                    helpUrl = AddressableAssetUtility.GenerateDocsURL("group-inspector-settings-reference.html#content-update-group-schema");
+                Action helpAction = null;
 
-                Action<Rect> menuAction = rect =>
+                if (!string.IsNullOrEmpty(helpUrl))
+                    helpAction = () => { Application.OpenURL(helpUrl); };
+
+                Action<Rect> menuAction = null;
+                if (!m_GroupTarget.ReadOnly)
+                    menuAction = rect =>
                 {
                     var menu = new GenericMenu();
                     menu.AddItem(AddressableAssetGroup.RemoveSchemaContent, false, () =>
                     {
-                        if (EditorUtility.DisplayDialog("Remove selected schema?",
-                                "Are you sure you want to remove " + AddressableAssetUtility.GetCachedTypeDisplayName(schemaType) + " schema?\n\nYou cannot undo this action.", "Yes", "No"))
+                        string dialogMessage = "Are you sure you want to remove " + AddressableAssetUtility.GetCachedTypeDisplayName(schemaType) + " schema?";
+                        bool removingBundledAssetGroupSchemaFromSharedBundleGroup = false;
+                        if (schema is BundledAssetGroupSchema)
                         {
-                            m_GroupTarget.RemoveSchema(schemaType);
+                            var sharedGroup = schema.Group.Settings.GetSharedBundleGroup();
+                            foreach (var t in targets)
+                            {
+                                if (t is AddressableAssetGroup group)
+                                {
+                                    if (sharedGroup == group)
+                                    {
+                                        dialogMessage += $"\n\nNote: Your current Addressable build settings are using data from this schema on group {sharedGroup.Name}. If you remove this schema, it may cause issues with building and loading Addressable assets. " +
+                                            "You can change which Group is used for these settings in AddressableAssetSettings -> Shared Group Settings.";
+                                        removingBundledAssetGroupSchemaFromSharedBundleGroup = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (targets.Length > 1)
+                        {
+                            dialogMessage += $"\n\nThis will apply to {targets.Length} selected groups.";
+                        }
+
+                        dialogMessage += "\n\nYou cannot undo this action.";
+
+                        if (EditorUtility.DisplayDialog("Remove selected schema?", dialogMessage, "Yes", "No"))
+                        {
+                            OnRemoveSchema(schemaType);
+                            if (removingBundledAssetGroupSchemaFromSharedBundleGroup)
+                            {
+                                Debug.LogWarning("You have removed the Bundled Asset Group Schema from the Shared Bundle Settings group. " +
+                                    "Please ensure that another group has this schema added and you change the AddressableAssetSettings -> Shared Bundle Settings " +
+                                    "before building Addressables to avoid build issues.");
+                            }
                         }
                     });
                     menu.AddItem(AddressableAssetGroup.MoveSchemaUpContent, false, () =>
                     {
                         if (currentIndex > 0)
                         {
-                            m_GroupTarget.Schemas[currentIndex] = m_GroupTarget.Schemas[currentIndex - 1];
-                            m_GroupTarget.Schemas[currentIndex - 1] = schema;
+                            Undo.RecordObject(m_GroupTarget, "Move Schema Up");
+                            var displayOrder = m_GroupTarget.SchemaDisplayOrder;
+                            var temp = displayOrder[currentIndex];
+                            displayOrder[currentIndex] = displayOrder[currentIndex - 1];
+                            displayOrder[currentIndex - 1] = temp;
+                            EditorUtility.SetDirty(m_GroupTarget);
                         }
                     });
                     menu.AddItem(AddressableAssetGroup.MoveSchemaDownContent, false, () =>
                     {
-                        if (currentIndex < m_GroupTarget.Schemas.Count - 1)
+                        if (currentIndex < m_GroupTarget.SchemaDisplayOrder.Count - 1)
                         {
-                            m_GroupTarget.Schemas[currentIndex] = m_GroupTarget.Schemas[currentIndex + 1];
-                            m_GroupTarget.Schemas[currentIndex + 1] = schema;
+                            Undo.RecordObject(m_GroupTarget, "Move Schema Down");
+                            var displayOrder = m_GroupTarget.SchemaDisplayOrder;
+                            var temp = displayOrder[currentIndex];
+                            displayOrder[currentIndex] = displayOrder[currentIndex + 1];
+                            displayOrder[currentIndex + 1] = temp;
+                            EditorUtility.SetDirty(m_GroupTarget);
                         }
                     });
                     menu.AddSeparator("");
@@ -215,10 +314,14 @@ namespace UnityEditor.AddressableAssets.GUI
                     });
                     menu.ShowAsContext();
                 };
-
+                string displayName = AddressableAssetUtility.GetCachedTypeDisplayName(schemaType);
+                GUIContent foldoutContent = new GUIContent(displayName);
                 EditorGUI.BeginChangeCheck();
-                foldoutActive = AddressablesGUIUtility.BeginFoldoutHeaderGroupWithHelp(foldoutActive, new GUIContent(AddressableAssetUtility.GetCachedTypeDisplayName(schemaType)),
-                    string.IsNullOrEmpty(helpUrl) ? null : helpAction, 0, m_GroupTarget.ReadOnly ? null : menuAction);
+
+                foldoutActive = AddressablesGUIUtility.BeginFoldoutHeaderGroupWithHelp(
+                    foldoutActive, foldoutContent, helpAction, 0,
+                    menuAction, schema, m_GroupTarget, m_GroupTargets);
+
                 if (EditorGUI.EndChangeCheck())
                     AddressablesGUIUtility.SetFoldoutValue(foldoutKey, foldoutActive);
                 EditorGUI.EndFoldoutHeaderGroup();
@@ -266,7 +369,7 @@ namespace UnityEditor.AddressableAssets.GUI
                     {
                         var type = m_SchemaTypes[i];
 
-                        if (m_GroupTarget.GetSchema(type) == null)
+                        if (CanMultiSelectForAddSchema(type))
                         {
                             menu.AddItem(new GUIContent(AddressableAssetUtility.GetCachedTypeDisplayName(type), ""), false, () => OnAddSchema(type));
                         }
@@ -286,16 +389,97 @@ namespace UnityEditor.AddressableAssets.GUI
             EditorGUILayout.EndVertical();
         }
 
-        void OnAddSchema(Type schemaType, bool multiSelect = false)
+        internal static List<AddressableAssetGroup> GetGroupsWithoutSchema(IEnumerable<AddressableAssetGroup> groups, Type schemaType)
+        {
+            var result = new List<AddressableAssetGroup>();
+            foreach (var group in groups)
+            {
+                if (group != null && !group.ReadOnly && !group.HasSchema(schemaType))
+                    result.Add(group);
+            }
+            return result;
+        }
+
+        internal static List<AddressableAssetGroup> GetGroupsWithSchema(IEnumerable<AddressableAssetGroup> groups, Type schemaType)
+        {
+            var result = new List<AddressableAssetGroup>();
+            foreach (var group in groups)
+            {
+                if (group != null && !group.ReadOnly && group.HasSchema(schemaType))
+                    result.Add(group);
+            }
+            return result;
+        }
+
+        void OnAddSchema(Type schemaType)
         {
             if (targets.Length > 1)
             {
-                foreach (var t in m_GroupTargets)
-                    if (!t.HasSchema(schemaType))
-                        t.AddSchema(schemaType);
+                var groupsToAdd = GetGroupsWithoutSchema(m_GroupTargets, schemaType);
+                if (groupsToAdd.Count == 0)
+                    return;
+
+                // Batch asset operations for better performance
+                AssetDatabase.StartAssetEditing();
+                try
+                {
+                    for (int i = 0; i < groupsToAdd.Count; i++)
+                    {
+                        // Don't save assets in the loop - we'll save once at the end
+                        groupsToAdd[i].AddSchema(schemaType, postEvent: true, saveAssets: false);
+                    }
+                }
+                finally
+                {
+                    AssetDatabase.StopAssetEditing();
+                }
+
+                // Save all assets once at the end instead of once per group
+                AssetDatabase.SaveAssets();
             }
             else
                 m_GroupTarget.AddSchema(schemaType);
+        }
+
+        private bool CanMultiSelectForAddSchema(Type schemaType)
+        {
+            // Single selection: check only the primary target
+            if (targets.Length == 1)
+                return m_GroupTarget.GetSchema(schemaType) == null;
+
+            // Multi-selection: return true if ANY group is missing the schema
+            var groupsWithoutSchema = GetGroupsWithoutSchema(m_GroupTargets, schemaType);
+            return groupsWithoutSchema.Count > 0;
+        }
+
+        void OnRemoveSchema(Type schemaType)
+        {
+            if (targets.Length > 1)
+            {
+                var groupsToRemove = GetGroupsWithSchema(m_GroupTargets, schemaType);
+                if (groupsToRemove.Count == 0)
+                    return;
+
+                // Batch asset operations for better performance
+                AssetDatabase.StartAssetEditing();
+                try
+                {
+                    for (int i = 0; i < groupsToRemove.Count; i++)
+                    {
+                        // Don't save assets in the loop - we'll save once at the end
+                        groupsToRemove[i].RemoveSchema(schemaType, postEvent: true, saveAssets: false);
+                    }
+                }
+                finally
+                {
+                    AssetDatabase.StopAssetEditing();
+                }
+
+                // Save all assets once at the end instead of once per group
+                AssetDatabase.SaveAssets();
+            }
+            else
+                m_GroupTarget.RemoveSchema(schemaType);
         }
 
         class GroupSchemasCompare : IEqualityComparer<AddressableAssetGroupSchema>

@@ -1,23 +1,19 @@
-using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using UnityEditor.AddressableAssets.Tests.Runtime.TestObjects;
 using UnityEngine;
-using UnityEngine.ResourceManagement;
 using UnityEngine.AddressableAssets;
-using UnityEngine.ResourceManagement.Util;
-using UnityEngine.ResourceManagement.ResourceProviders;
-using UnityEngine.ResourceManagement.AsyncOperations;
+using UnityEngine.AddressableAssets.ResourceLocators;
 using UnityEngine.TestTools;
 using UnityEngine.U2D;
-using NUnit.Framework;
-
 
 #if UNITY_EDITOR
 using UnityEditor;
-using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Build;
+using UnityEditor.AddressableAssets.Build.DataBuilders;
+using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
+using UnityEditor.AddressableAssets.Tests;
 using UnityEditor.U2D;
 #endif
 
@@ -71,7 +67,7 @@ public static class AddressablesTestUtility
     public const int kPrefabCount = 10;
     public const int kMaxWebRequestCount = 5;
 
-    public static void Setup(string testType, string pathFormat, string suffix, bool useUnityWebRequestForLocalBundles)
+    public static void Setup(string testType, string pathFormat, string suffix, bool useUnityWebRequestForLocalBundles, bool useJsonCatalog = false)
     {
 #if UNITY_EDITOR
         bool currentIgnoreState = LogAssert.ignoreFailingMessages;
@@ -86,6 +82,7 @@ public static class AddressablesTestUtility
         AddressablesTestUtility.CreateAsset(RootFolder + "/nonaddressable0" + suffix + ".prefab", "nonAddressable0");
 
         var settings = AddressableAssetSettings.Create(RootFolder + "/Settings", "AddressableAssetSettings.Tests", false, true);
+        settings.EnableJsonCatalog = useJsonCatalog;
         settings.MaxConcurrentWebRequests = kMaxWebRequestCount;
         var group = settings.FindGroup("TestStuff" + suffix);
 
@@ -133,16 +130,17 @@ public static class AddressablesTestUtility
         var spriteEntry = settings.CreateOrMoveEntry(AssetDatabase.AssetPathToGUID(spritePath), group, false, false);
         spriteEntry.address = "sprite";
 
-        var so = ScriptableObject.CreateInstance<UnityEngine.AddressableAssets.Tests.TestObject>();
-        var sub = ScriptableObject.CreateInstance<UnityEngine.AddressableAssets.Tests.TestObject>();
+        var so = ScriptableObject.CreateInstance<TestObject>();
+        var sub = ScriptableObject.CreateInstance<TestObject>();
         sub.name = "sub-shown";
-        var sub2 = ScriptableObject.CreateInstance<UnityEngine.AddressableAssets.Tests.TestObject>();
+        var sub2 = ScriptableObject.CreateInstance<TestObject>();
         sub2.hideFlags |= HideFlags.HideInHierarchy;
         sub2.name = "sub2-hidden";
         so.name = "main";
         AssetDatabase.CreateAsset(so, RootFolder + "/assetWithSubObjects.asset");
         AssetDatabase.AddObjectToAsset(sub, RootFolder + "/assetWithSubObjects.asset");
         AssetDatabase.AddObjectToAsset(sub2, RootFolder + "/assetWithSubObjects.asset");
+        AssetDatabase.SaveAssets();
         AssetDatabase.ImportAsset(RootFolder + "/assetWithSubObjects.asset", ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
         var assetWithSubObjectsGUID = AssetDatabase.AssetPathToGUID(RootFolder + "/assetWithSubObjects.asset");
         string assetRefGuid = CreateAsset(RootFolder + "/testIsReference.prefab", "IsReference");
@@ -163,13 +161,14 @@ public static class AddressablesTestUtility
 
         //AssetDatabase.StopAssetEditing();
 
-        ScriptableObject assetWithDifferentTypedSubAssets = ScriptableObject.CreateInstance<UnityEngine.AddressableAssets.Tests.TestObject>();
+        ScriptableObject assetWithDifferentTypedSubAssets = ScriptableObject.CreateInstance<TestObject>();
         AssetDatabase.CreateAsset(assetWithDifferentTypedSubAssets, $"{RootFolder}/assetWithDifferentTypedSubAssets.asset");
 
         Material mat = new Material(Shader.Find("Transparent/Diffuse"));
         Mesh mesh = new Mesh();
         AssetDatabase.AddObjectToAsset(mat, assetWithDifferentTypedSubAssets);
         AssetDatabase.AddObjectToAsset(mesh, assetWithDifferentTypedSubAssets);
+        AssetDatabase.SaveAssets();
 
         AssetDatabase.ImportAsset($"{RootFolder}/assetWithDifferentTypedSubAssets.asset", ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
         var assetWithDifferentTypedSubObjectsGUID = AssetDatabase.AssetPathToGUID($"{RootFolder}/assetWithDifferentTypedSubAssets.asset");
@@ -189,10 +188,19 @@ public static class AddressablesTestUtility
         AssetDatabase.SaveAssets();
         AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
 
-        RunBuilder(settings, testType, suffix);
+        ReplaceStockPackedModeWithAllHooksIfRequested(settings, testType);
+
+        RunBuilder(settings, testType, suffix, useJsonCatalog);
         LogAssert.ignoreFailingMessages = currentIgnoreState;
 
 #endif
+    }
+
+    internal static ContentCatalogData CreateCatalogData(bool useJsonCatalog, string id = null)
+    {
+        if (useJsonCatalog)
+            return id != null ? new JsonContentCatalogData(id) : new JsonContentCatalogData();
+        return id != null ? new BinaryContentCatalogData(id) : new BinaryContentCatalogData();
     }
 
 #if UNITY_EDITOR
@@ -268,17 +276,36 @@ public static class AddressablesTestUtility
         UnityEngine.Object.DestroyImmediate(go, false);
         return AssetDatabase.AssetPathToGUID(assetPath);
     }
-    const string kCatalogExt =
-#if !ENABLE_JSON_CATALOG
-            ".bin";
-#else
-            ".json";
-#endif
-    static void RunBuilder(AddressableAssetSettings settings, string testType, string suffix)
+    /// <summary>
+    /// When integration tests request <see cref="AllHooksLoggingPackedMode"/> by short type name, replace the
+    /// template <see cref="BuildScriptPackedMode"/> asset (exact type match) so <see cref="RunBuilder"/> finds the subclass.
+    /// </summary>
+    static void ReplaceStockPackedModeWithAllHooksIfRequested(AddressableAssetSettings settings, string testType)
+    {
+        if (testType != typeof(AllHooksLoggingPackedMode).Name)
+            return;
+
+        AllHooksLoggingPackedMode.ClearInvocationRecord();
+
+        for (int i = 0; i < settings.DataBuilders.Count; i++)
+        {
+            var so = settings.DataBuilders[i];
+            if (so != null && so.GetType() == typeof(BuildScriptPackedMode))
+            {
+                var old = so;
+                var replacement = ScriptableObject.CreateInstance<AllHooksLoggingPackedMode>();
+                settings.SetDataBuilderAtIndex(i, replacement, postEvent: false);
+                UnityEngine.Object.DestroyImmediate(old, true);
+                break;
+            }
+        }
+    }
+
+    static void RunBuilder(AddressableAssetSettings settings, string testType, string suffix, bool useJsonCatalog)
     {
         var buildContext = new AddressablesDataBuilderInput(settings);
         buildContext.RuntimeSettingsFilename = "settings" + suffix + ".json";
-        buildContext.RuntimeCatalogFilename = "catalog" + suffix + kCatalogExt;
+        buildContext.RuntimeCatalogFilename = "catalog" + suffix + (useJsonCatalog ? ".json" : ".bin");
         foreach (var db in settings.DataBuilders)
         {
             var b = db as IDataBuilder;
@@ -287,7 +314,7 @@ public static class AddressablesTestUtility
 
             buildContext.PathSuffix = "_TEST_" + suffix;
             b.BuildData<AddressableAssetBuildResult>(buildContext);
-            PlayerPrefs.SetString(Addressables.kAddressablesRuntimeDataPath + testType, PlayerPrefs.GetString(Addressables.kAddressablesRuntimeDataPath, ""));
+            SessionState.SetString(Addressables.kAddressablesRuntimeDataPath + testType + "_" + suffix, SessionState.GetString(Addressables.kAddressablesRuntimeDataPath, ""));
         }
     }
 

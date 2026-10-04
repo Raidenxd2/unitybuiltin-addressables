@@ -10,7 +10,9 @@ using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEditor.Build.Pipeline.Utilities;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
+using UnityEngine.AddressableAssets.Initialization;
 using UnityEngine.AddressableAssets.ResourceLocators;
+using UnityEngine.AddressableAssets.ResourceProviders;
 using UnityEngine.ResourceManagement.AsyncOperations;
 using UnityEngine.ResourceManagement.Util;
 using UnityEngine.Serialization;
@@ -20,7 +22,7 @@ using UnityEditor.Build;
 using static UnityEditor.AddressableAssets.Settings.GroupSchemas.BundledAssetGroupSchema;
 using UnityEngine.ResourceManagement.ResourceProviders;
 
-#if (ENABLE_CCD && UNITY_2019_4_OR_NEWER)
+#if (ENABLE_CCD)
 using Unity.Services.Ccd.Management;
 using Unity.Services.Ccd.Management.Models;
 #endif
@@ -32,7 +34,8 @@ namespace UnityEditor.AddressableAssets.Settings
     /// <summary>
     /// Contains editor data for the addressables system.
     /// </summary>
-    public class AddressableAssetSettings : ScriptableObject, ISerializationCallbackReceiver
+    [AddressablesHelpURL("AddressableAssetSettings.html")]
+    public partial class AddressableAssetSettings : ScriptableObject, ISerializationCallbackReceiver
     {
         internal class Cache<T1, T2>
         {
@@ -188,7 +191,7 @@ namespace UnityEditor.AddressableAssets.Settings
         /// </summary>
         public const string kRemoteLoadPathValue = AddressableAssetProfileSettings.undefinedEntryValue;
 
-#if (ENABLE_CCD && UNITY_2019_4_OR_NEWER)
+#if (ENABLE_CCD)
         /// <summary>
         /// Default path of build assets that are uploaded to Ccd.
         /// </summary>
@@ -479,8 +482,9 @@ namespace UnityEditor.AddressableAssets.Settings
         [SerializeField]
         string m_DefaultGroup;
 
-        [FormerlySerializedAs("m_cachedHash")]
-        [SerializeField]
+        // Not serialized - this is recomputed lazily and persisting it caused the settings asset's on-disk
+        // hash to flip between a real value and zero as it was invalidated/recalculated, creating spurious
+        // source control diffs (CBD-2000).
         Hash128 m_currentHash;
         Hash128 m_selfHash;
 
@@ -524,10 +528,9 @@ namespace UnityEditor.AddressableAssets.Settings
         [SerializeField]
         bool m_BuildRemoteCatalog = false;
 
-#if ENABLE_JSON_CATALOG
+        // applicable only for JSON catalogs
         [SerializeField]
         bool m_BundleLocalCatalog = false;
-#endif
 
         [SerializeField]
         int m_CatalogRequestsTimeout = 0;
@@ -552,6 +555,23 @@ namespace UnityEditor.AddressableAssets.Settings
         [SerializedTypeRestriction(type = typeof(IResourceProvider))]
         internal SerializedType m_AssetBundleProviderType;
 
+#if ENABLE_CONTENT_DIRECTORIES
+        [SerializeField]
+        [SerializedTypeRestriction(type = typeof(IResourceProvider))]
+        internal SerializedType m_GroupAssetEntryProviderType;
+
+        // Legacy archiving toggle, retained (serialized) only so MigrateContentDirectoryArchiveMode
+        // can read the previously stored value. m_ContentDirectoryArchiveMode is the source of truth.
+        [SerializeField]
+        internal bool m_ArchiveContentDirectories = true;
+
+        [SerializeField]
+        ContentDirectoryArchiveMode m_ContentDirectoryArchiveMode = Build.ContentDirectoryArchiveMode.Lz4;
+
+        [SerializeField]
+        float m_TargetArchiveSizeInMB = 2000f;
+#endif
+
         [SerializeField]
         bool m_IgnoreUnsupportedFilesInBuild = false;
 
@@ -560,6 +580,10 @@ namespace UnityEditor.AddressableAssets.Settings
 
         [SerializeField]
         bool m_EnableJsonCatalog = false;
+
+        [SerializeField]
+        [SerializedTypeRestriction(type = typeof(ContentCatalogProvider))]
+        internal SerializedType m_CatalogProviderType = new SerializedType() { Value = typeof(BinaryCatalogProvider) };
 
         [SerializeField]
         bool m_NonRecursiveBuilding = true;
@@ -573,6 +597,19 @@ namespace UnityEditor.AddressableAssets.Settings
 #else
         bool m_CCDEnabled = true;
 #endif
+
+        [SerializeField]
+        bool m_ContentDirectoryGroupTemplateCreated = false;
+        internal bool ContentDirectoryGroupTemplateCreated
+        {
+            get { return m_ContentDirectoryGroupTemplateCreated; }
+            set
+            {
+                m_ContentDirectoryGroupTemplateCreated = value;
+                EditorUtility.SetDirty(this);
+            }
+        }
+
         /// <summary>
         /// A flag indicating whether or not a compatible version of the CCD package is installed
         /// for use with the CCD integration workflow
@@ -689,7 +726,7 @@ namespace UnityEditor.AddressableAssets.Settings
                         continue;
 
                     var schema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (schema != null)
+                    if (schema != null && schema.IsEnabled)
                     {
                         schema.UseUnityWebRequestForLocalBundles = value;
                         if(value)
@@ -714,7 +751,7 @@ namespace UnityEditor.AddressableAssets.Settings
                         continue;
 
                     var schema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (schema != null)
+                    if (schema != null && schema.IsEnabled)
                         schema.Timeout = value;
                 }
                 m_BundleTimeout = value;
@@ -735,7 +772,7 @@ namespace UnityEditor.AddressableAssets.Settings
                         continue;
 
                     var schema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (schema != null)
+                    if (schema != null && schema.IsEnabled)
                         schema.RetryCount = value;
                 }
                 m_BundleRetryCount = value;
@@ -756,7 +793,7 @@ namespace UnityEditor.AddressableAssets.Settings
                         continue;
 
                     var schema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (schema != null)
+                    if (schema != null && schema.IsEnabled)
                         schema.RedirectLimit = value;
                 }
                 m_BundleRedirectLimit = value;
@@ -773,12 +810,35 @@ namespace UnityEditor.AddressableAssets.Settings
         }
 
         /// <summary>
-        /// Set this true to use Json catalogs instead of Binary catalogs. Set to false to use binary catalogs.
+        /// The runtime <see cref="ContentCatalogProvider"/> type used to load catalogs for this build.
+        /// Shown as a dropdown in the Addressables settings inspector; drives
+        /// <see cref="Build.DataBuilders.BuildScriptBase.CreateCatalogBuilder"/>. Defaults to
+        /// <see cref="BinaryCatalogProvider"/>.
         /// </summary>
+        public Type CatalogProviderType
+        {
+            get { return m_CatalogProviderType.Value; }
+            set { m_CatalogProviderType = new SerializedType() { Value = value }; }
+        }
+
+        /// <summary>
+        /// Whether JSON catalogs are currently configured.
+        /// This is a back-compat shim over <see cref="CatalogProviderType"/>; prefer setting
+        /// <see cref="CatalogProviderType"/> directly where possible.
+        /// </summary>
+        /// <remarks>
+        /// The setter also keeps the legacy <c>m_EnableJsonCatalog</c> serialized field in sync so
+        /// that <see cref="RunMigrationSteps"/> can read it correctly when migrating settings
+        /// serialized by older versions of the package.
+        /// </remarks>
         public bool EnableJsonCatalog
         {
-            get { return m_EnableJsonCatalog; }
-            set { m_EnableJsonCatalog = value; }
+            get { return CatalogProviderType == typeof(JsonCatalogProvider); }
+            set
+            {
+                m_EnableJsonCatalog = value; // keep legacy field in sync for migration
+                CatalogProviderType = value ? typeof(JsonCatalogProvider) : typeof(BinaryCatalogProvider);
+            }
         }
 
         [SerializeField]
@@ -820,9 +880,9 @@ namespace UnityEditor.AddressableAssets.Settings
             set { m_BuildRemoteCatalog = value; }
         }
 
-#if ENABLE_JSON_CATALOG
         /// <summary>
         /// Whether the local catalog should be serialized in an asset bundle or as json.
+        /// Applicable only for JSON catalogs.
         /// </summary>
         public bool BundleLocalCatalog
         {
@@ -835,7 +895,6 @@ namespace UnityEditor.AddressableAssets.Settings
                 m_BundleLocalCatalog = value;
             }
         }
-#endif
 
         /// <summary>
         /// Tells Addressables if it should check for a Content Catalog Update during the initialization step.
@@ -860,7 +919,7 @@ namespace UnityEditor.AddressableAssets.Settings
                         continue;
 
                     var schema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (schema != null)
+                    if (schema != null && schema.IsEnabled)
                         schema.InternalIdNamingMode = value;
                 }
                 m_InternalIdNamingMode = value;
@@ -881,7 +940,7 @@ namespace UnityEditor.AddressableAssets.Settings
                         continue;
 
                     var schema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (schema != null)
+                    if (schema != null && schema.IsEnabled)
                         schema.InternalBundleIdMode = value;
                 }
                 m_InternalBundleIdMode = value;
@@ -902,7 +961,7 @@ namespace UnityEditor.AddressableAssets.Settings
                         continue;
 
                     var schema = group.GetSchema<BundledAssetGroupSchema>();
-                    if (schema != null)
+                    if (schema != null && schema.IsEnabled)
                         schema.AssetLoadMode = value;
                 }
                 m_AssetLoadMode = value;
@@ -930,7 +989,7 @@ namespace UnityEditor.AddressableAssets.Settings
                     continue;
 
                 var schema = group.GetSchema<BundledAssetGroupSchema>();
-                if (schema != null)
+                if (schema != null && schema.IsEnabled)
                     schema.BundledAssetProviderType = BundledAssetProviderType;
             }
         }
@@ -956,21 +1015,82 @@ namespace UnityEditor.AddressableAssets.Settings
                     continue;
 
                 var schema = group.GetSchema<BundledAssetGroupSchema>();
-                if (schema != null)
+                if (schema != null && schema.IsEnabled)
                     schema.AssetBundleProviderType = AssetBundleProviderType;
             }
         }
+#if ENABLE_CONTENT_DIRECTORIES
+        /// <summary>
+        /// The provider type to use for loading entries from group assets.
+        /// </summary>
+        public SerializedType GroupAssetEntryProviderType
+        {
+            get => m_GroupAssetEntryProviderType;
+            set
+            {
+                m_GroupAssetEntryProviderType = value;
+                UpdateGroupAssetEntryProviderType();
+            }
+        }
 
+        internal void UpdateGroupAssetEntryProviderType()
+        {
+            foreach (AddressableAssetGroup group in groups)
+            {
+                if (group == null)
+                    continue;
+
+                var schema = group.GetSchema<ContentDirectoryGroupSchema>();
+                if (schema != null)
+                    schema.GroupAssetEntryProviderType = GroupAssetEntryProviderType;
+            }
+        }
+
+        /// <summary>
+        /// Determines whether content-directory build artifacts are packed into archive files,
+        /// and which compression is applied when they are.
+        /// </summary>
+        public ContentDirectoryArchiveMode ContentDirectoryArchiveMode
+        {
+            get { return m_ContentDirectoryArchiveMode; }
+            set { m_ContentDirectoryArchiveMode = value; }
+        }
+
+        /// <summary>
+        /// If true, content-directory build artifacts are archived rather than being left
+        /// as individual files on disk.
+        /// </summary>
+        [Obsolete("Use ContentDirectoryArchiveMode instead. The getter returns true for any mode other than ContentDirectoryArchiveMode.None; the setter selects ContentDirectoryArchiveMode.Lz4 for true and ContentDirectoryArchiveMode.None for false.")]
+        public bool ArchiveContentDirectories
+        {
+            get { return m_ContentDirectoryArchiveMode != ContentDirectoryArchiveMode.None; }
+            set { m_ContentDirectoryArchiveMode = value ? ContentDirectoryArchiveMode.Lz4 : ContentDirectoryArchiveMode.None; }
+        }
+
+        /// <summary>
+        /// Target size in megabytes for each content-directory archive file.
+        /// Content will be split across multiple archives when this limit is exceeded.
+        /// Applies to every <see cref="ContentDirectoryArchiveMode"/> that archives content.
+        /// Minimum value is 1 MB.
+        /// </summary>
+        public float TargetArchiveSizeInMB
+        {
+            get { return m_TargetArchiveSizeInMB; }
+            set { m_TargetArchiveSizeInMB = Mathf.Max(1f, value); }
+        }
+#endif
+
+        [FormerlySerializedAs("m_StripUnityVersionFromBundleBuild")]
         [SerializeField]
-        bool m_StripUnityVersionFromBundleBuild = false;
+        bool mStripUnityVersion = false;
 
         /// <summary>
         /// If true, this option will strip the Unity Editor Version from the header of the AssetBundle during a build.
         /// </summary>
-        internal bool StripUnityVersionFromBundleBuild
+        public bool StripUnityVersion
         {
-            get { return m_StripUnityVersionFromBundleBuild; }
-            set { m_StripUnityVersionFromBundleBuild = value; }
+            get { return mStripUnityVersion; }
+            set { mStripUnityVersion = value; }
         }
 
         [SerializeField]
@@ -1127,7 +1247,7 @@ namespace UnityEditor.AddressableAssets.Settings
         {
             get
             {
-                if (m_RemoteCatalogBuildPath.Id == null)
+                if (string.IsNullOrEmpty(m_RemoteCatalogBuildPath?.Id))
                 {
                     m_RemoteCatalogBuildPath = new ProfileValueReference();
                     m_RemoteCatalogBuildPath.SetVariableByName(this, kRemoteBuildPath);
@@ -1149,7 +1269,7 @@ namespace UnityEditor.AddressableAssets.Settings
         {
             get
             {
-                if (m_RemoteCatalogLoadPath.Id == null)
+                if (m_RemoteCatalogLoadPath?.Id == null)
                 {
                     m_RemoteCatalogLoadPath = new ProfileValueReference();
                     m_RemoteCatalogLoadPath.SetVariableByName(this, kRemoteLoadPath);
@@ -1209,7 +1329,13 @@ namespace UnityEditor.AddressableAssets.Settings
             set { m_BuildAddressablesWithPlayerBuild = value; }
         }
 
-        internal string GetContentStateBuildPath()
+        /// <summary>
+        /// Returns the folder path where the content-state file (used for update builds)
+        /// is written. Combines the config folder and the platform path sub-folder, or the
+        /// custom path set on this settings object if one has been configured.
+        /// </summary>
+        /// <returns>Absolute path to the content-state output directory.</returns>
+        public string GetContentStateBuildPath()
         {
             string p = ConfigFolder;
             if (!string.IsNullOrEmpty(m_ContentStateBuildPath))
@@ -1422,6 +1548,16 @@ namespace UnityEditor.AddressableAssets.Settings
                 return false;
             }
 
+            // Avoid duplicates: same reference, or same asset file (e.g. after downgrade/upgrade the list may have been deserialized with different references to the same template asset)
+            string assetPath = AssetDatabase.GetAssetPath(so);
+            foreach (var templateObj in m_GroupTemplateObjects)
+            {
+                if (templateObj == so)
+                    return false;
+                if (!string.IsNullOrEmpty(assetPath) && templateObj != null && AssetDatabase.GetAssetPath(templateObj) == assetPath)
+                    return false;
+            }
+
             m_GroupTemplateObjects.Add(so);
             SetDirty(ModificationEvent.GroupTemplateAdded, so, postEvent, true);
             return true;
@@ -1592,7 +1728,7 @@ namespace UnityEditor.AddressableAssets.Settings
 
         [FormerlySerializedAs("m_activePlayerDataBuilderIndex")]
         [SerializeField]
-        int m_ActivePlayerDataBuilderIndex = 2;
+        int m_ActivePlayerDataBuilderIndex = 3;
 
         [FormerlySerializedAs("m_dataBuilders")]
         [SerializeField]
@@ -1877,12 +2013,34 @@ namespace UnityEditor.AddressableAssets.Settings
         /// <param name="entryFilter">A method to filter entries.  Entries will be processed if filter is null, or it returns TRUE</param>
         public void GetAllAssets(List<AddressableAssetEntry> assets, bool includeSubObjects, Func<AddressableAssetGroup, bool> groupFilter = null, Func<AddressableAssetEntry, bool> entryFilter = null)
         {
-            using (var cache = new AddressablesFileEnumerationCache(this, false, null))
+            GetAllAssets(assets, includeSubObjects, groupFilter, entryFilter, null);
+        }
+
+        /// <summary>
+        /// Gets all asset entries from all groups, sharing the folder walk held by an enumerator.
+        /// </summary>
+        /// <param name="enumerator">Reuses this enumerator's folder walk. Pass null to walk fresh.</param>
+        internal void GetAllAssets(List<AddressableAssetEntry> assets, bool includeSubObjects, Func<AddressableAssetGroup, bool> groupFilter,
+            Func<AddressableAssetEntry, bool> entryFilter, AddressableFolderEnumerator enumerator)
+        {
+            if (enumerator != null)
             {
-                foreach (var g in groups)
-                    if (g != null && (groupFilter == null || groupFilter(g)))
-                        g.GatherAllAssets(assets, true, true, includeSubObjects, entryFilter);
+                GatherAssetsFromGroups(assets, includeSubObjects, groupFilter, entryFilter, enumerator);
+                return;
             }
+
+            // Still worth one enumerator for this call alone, so a folder several groups
+            // share is walked once rather than once per group.
+            using (var owned = new AddressableFolderEnumerator(this, false, null))
+                GatherAssetsFromGroups(assets, includeSubObjects, groupFilter, entryFilter, owned);
+        }
+
+        void GatherAssetsFromGroups(List<AddressableAssetEntry> assets, bool includeSubObjects, Func<AddressableAssetGroup, bool> groupFilter,
+            Func<AddressableAssetEntry, bool> entryFilter, AddressableFolderEnumerator enumerator)
+        {
+            foreach (var g in groups)
+                if (g != null && (groupFilter == null || groupFilter(g)))
+                    g.GatherAllAssets(assets, true, true, includeSubObjects, entryFilter, enumerator);
         }
 
         internal void GatherAllAssetReferenceDrawableEntries(List<IReferenceEntryData> assets)
@@ -1930,6 +2088,17 @@ namespace UnityEditor.AddressableAssets.Settings
         {
             profileSettings.OnAfterDeserialize(this);
             buildSettings.OnAfterDeserialize(this);
+        }
+
+        void OnEnable()
+        {
+            // Awake() is not called on already-serialized ScriptableObjects after a domain reload,
+            // but [NonSerialized] back-references (BuildProfile.m_ProfileParent etc.) are wiped.
+            // Re-wire them here so GetValueById can walk the profile inheritance chain correctly.
+            profileSettings?.OnAfterDeserialize(this);
+            buildSettings?.OnAfterDeserialize(this);
+
+            Undo.undoRedoPerformed -= ResetHashes;
             Undo.undoRedoPerformed += ResetHashes;
         }
 
@@ -1954,10 +2123,12 @@ namespace UnityEditor.AddressableAssets.Settings
         }
 
         private string m_DefaultGroupTemplateName = "Packed Assets";
+        private string m_ContentDirectoryGroupTemplateName = "Content Directory";
+        private static Type SchemaDrivenType = typeof(BuildScriptSchemaDriven);
         private static Type PackedModeType = typeof(BuildScriptPackedMode);
         private static Type FastModeType = typeof(BuildScriptFastMode);
 
-        void Validate()
+        internal void Validate()
         {
             // Begin update any SchemaTemplate to GroupTemplateObjects
             if (m_SchemaTemplates != null && m_SchemaTemplates.Count > 0)
@@ -1967,7 +2138,16 @@ namespace UnityEditor.AddressableAssets.Settings
             }
 
             if (m_GroupTemplateObjects.Count == 0)
+            {
                 CreateDefaultGroupTemplate(this);
+            }
+
+#if ENABLE_CONTENT_DIRECTORIES
+            if (!ContentDirectoryGroupTemplateCreated)
+            {
+                CreateContentDirectoryGroupTemplate(this);
+            }
+#endif
             // End update of SchemaTemplate to GroupTemplates
 
             if (m_BuildSettings == null)
@@ -1984,6 +2164,7 @@ namespace UnityEditor.AddressableAssets.Settings
                 m_DataBuilders.Add(CreateScriptAsset<BuildScriptFastMode>());
                 m_DataBuilders.Add(CreateScriptAsset<BuildScriptPackedPlayMode>());
                 m_DataBuilders.Add(CreateScriptAsset<BuildScriptPackedMode>());
+                m_DataBuilders.Add(CreateScriptAsset<BuildScriptSchemaDriven>());
             }
             else
             {
@@ -1999,12 +2180,28 @@ namespace UnityEditor.AddressableAssets.Settings
             }
 
             if (ActivePlayerDataBuilder != null && !ActivePlayerDataBuilder.CanBuildData<AddressablesPlayerBuildResult>())
-                ActivePlayerDataBuilderIndex = m_DataBuilders.IndexOf(m_DataBuilders.Find(s => s.GetType() == PackedModeType));
+                ActivePlayerDataBuilderIndex = m_DataBuilders.IndexOf(m_DataBuilders.Find(s => s.GetType() == SchemaDrivenType));
             if (ActivePlayModeDataBuilder != null && !ActivePlayModeDataBuilder.CanBuildData<AddressablesPlayModeBuildResult>())
                 ActivePlayModeDataBuilderIndex = m_DataBuilders.IndexOf(m_DataBuilders.Find(s => s.GetType() == FastModeType));
 
             profileSettings.Validate(this);
             buildSettings.Validate(this);
+        }
+
+        void EnsureBuildScriptAdded<T>() where T : BuildScriptBase
+        {
+            var type = typeof(T);
+            bool found = false;
+            foreach (var so in m_DataBuilders)
+            {
+                if (so != null && so.GetType() == type)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                m_DataBuilders.Add(CreateScriptAsset<T>());
         }
 
         internal T CreateScriptAsset<T>() where T : ScriptableObject
@@ -2014,7 +2211,10 @@ namespace UnityEditor.AddressableAssets.Settings
                 Directory.CreateDirectory(DataBuilderFolder);
             var path = DataBuilderFolder + "/" + typeof(T).Name + ".asset";
             if (!File.Exists(path))
+            {
                 AssetDatabase.CreateAsset(script, path);
+                return script;
+            }
             return AssetDatabase.LoadAssetAtPath<T>(path);
         }
 
@@ -2242,6 +2442,24 @@ namespace UnityEditor.AddressableAssets.Settings
             return true;
         }
 
+        private static bool CreateContentDirectoryGroupTemplate(AddressableAssetSettings aa)
+        {
+            string assetPath = aa.GroupTemplateFolder + "/" + aa.m_ContentDirectoryGroupTemplateName + ".asset";
+
+            if (File.Exists(assetPath))
+            {
+                aa.ContentDirectoryGroupTemplateCreated = true;
+                return LoadGroupTemplateObject(aa, assetPath);
+            }
+
+            AddressableAssetGroupTemplate groupTemplate = aa.CreateAndAddGroupTemplateInternal(aa.m_ContentDirectoryGroupTemplateName, "Pack assets into ContentDirectories.", typeof(ContentDirectoryGroupSchema));
+            if (groupTemplate == null)
+                return false;
+
+            aa.ContentDirectoryGroupTemplateCreated = true;
+            return true;
+        }
+
         private static bool LoadGroupTemplateObject(AddressableAssetSettings aa, string assetPath)
         {
             return aa.AddGroupTemplateObject(AssetDatabase.LoadAssetAtPath(assetPath, typeof(ScriptableObject)) as IGroupTemplate);
@@ -2347,9 +2565,12 @@ namespace UnityEditor.AddressableAssets.Settings
         /// </summary>
         /// <param name="guid">The asset guid.</param>
         /// <param name="includeImplicit">Whether or not to include implicit asset entries in the search.</param>
-        /// <returns>The found entry or null.</returns>
+        /// <returns>The found entry or null. A null or empty guid returns null.</returns>
         public AddressableAssetEntry FindAssetEntry(string guid, bool includeImplicit)
         {
+            if (string.IsNullOrEmpty(guid))
+                return null;
+
             AddressableAssetEntry foundEntry = null;
             if (m_FindAssetEntryCache != null)
             {
@@ -2621,7 +2842,8 @@ namespace UnityEditor.AddressableAssets.Settings
             }
             else
             {
-                if (AssetDatabase.GetMainAssetTypeAtPath(path) != null && BuildUtility.IsEditorAssembly(AssetDatabase.GetMainAssetTypeAtPath(path).Assembly))
+                var mainAssetType = AssetDatabase.GetMainAssetTypeAtPath(path);
+                if (mainAssetType != null && BuildUtility.IsEditorAssembly(mainAssetType.Assembly))
                     return null;
                 entry = CreateEntry(guid, guid, targetParent, true, postEvent);
             }
@@ -2905,7 +3127,7 @@ namespace UnityEditor.AddressableAssets.Settings
                     bool inEditorSceneList = BuiltinSceneCache.Contains(new GUID(guid));
 
                     //update entry cached path
-                    entry?.SetCachedPath(str);
+                    entry?.RepointToNewPath(str);
 
                     //move to Resources
                     if (isAlreadyAddressable && endedInResources)
@@ -2969,7 +3191,7 @@ namespace UnityEditor.AddressableAssets.Settings
             BuildPlayerContent(out AddressablesPlayerBuildResult rst);
         }
 
-#if (ENABLE_CCD && UNITY_2019_4_OR_NEWER)
+#if (ENABLE_CCD)
         /// <summary>
         /// Runs the active player data build script to create runtime data.
         /// Any groups referencing CCD group type will have the produced bundles uploaded to the specified non-promotion only bucket.
@@ -2992,27 +3214,39 @@ namespace UnityEditor.AddressableAssets.Settings
 
         internal static async Task<AddressableAssetBuildResult> BuildAndReleasePlayerContent(bool isUpdate)
         {
-            EditorUtility.DisplayProgressBar($"CCD", "Prebuild", 0.3f);
-            var settings = AddressableAssetSettingsDefaultObject.Settings;
-            var builderInput = new AddressablesDataBuilderInput(settings);
-
-            var continueBuild = await CcdBuildEvents.Instance.OnPreEvent(isUpdate, builderInput);
-            if (!continueBuild)
+            try
             {
-                throw new Exception("CCD content pre-build failure");
+                EditorUtility.DisplayProgressBar($"CCD", "Prebuild", 0.3f);
+                var settings = AddressableAssetSettingsDefaultObject.Settings;
+                var builderInput = new AddressablesDataBuilderInput(settings);
+
+                var continueBuild = await CcdBuildEvents.Instance.OnPreEvent(isUpdate, builderInput);
+                if (!continueBuild)
+                {
+                    throw new Exception("CCD content pre-build failure");
+                }
+
+                EditorUtility.DisplayProgressBar($"CCD", "Building", 0.6f);
+
+                BuildPlayerContent(out AddressablesPlayerBuildResult rst, builderInput);
+
+                if (!string.IsNullOrEmpty(rst.Error))
+                {
+                    throw new Exception($"CCD content build failure: {rst.Error}");
+                }
+
+                EditorUtility.DisplayProgressBar($"CCD", "Postbuild", 0.9f);
+                continueBuild = await CcdBuildEvents.Instance.OnPostEvent(isUpdate, builderInput, rst);
+                if (!continueBuild)
+                {
+                    throw new Exception("CCD content post-build failure");
+                }
+                return rst;
             }
-
-            EditorUtility.DisplayProgressBar($"CCD", "Building", 0.6f);
-
-            BuildPlayerContent(out AddressablesPlayerBuildResult rst, builderInput);
-
-            EditorUtility.DisplayProgressBar($"CCD", "Postbuild", 0.9f);
-            continueBuild = await CcdBuildEvents.Instance.OnPostEvent(isUpdate, builderInput, rst);
-            if (!continueBuild)
+            finally
             {
-                throw new Exception("CCD content post-build failure");
+                EditorUtility.ClearProgressBar();
             }
-            return rst;
         }
 
 #endif
@@ -3050,7 +3284,7 @@ namespace UnityEditor.AddressableAssets.Settings
             result = settings.BuildPlayerContentImpl(input);
         }
 
-        const string k_EnableJsonCatalogSymbol = "ENABLE_JSON_CATALOG";
+        internal const string k_EnableJsonCatalogSymbol = "ENABLE_JSON_CATALOG";
 
         internal static void NullifyBundleFileIds(AddressableAssetSettings settings)
         {
@@ -3188,6 +3422,7 @@ namespace UnityEditor.AddressableAssets.Settings
                 }
             }
 
+            AddressableAssetUtility.ClearRuntimeTypeCache();
             AssetDatabase.Refresh();
         }
 
@@ -3386,6 +3621,10 @@ namespace UnityEditor.AddressableAssets.Settings
                 m_AssetBundleProviderType.Value = typeof(AssetBundleProvider);
             if (m_BundledAssetProviderType.Value == null)
                 m_BundledAssetProviderType.Value = typeof(BundledAssetProvider);
+#if ENABLE_CONTENT_DIRECTORIES
+            if (m_GroupAssetEntryProviderType.Value == null)
+                m_GroupAssetEntryProviderType.Value = typeof(NativeContentAssetEntryProvider);
+#endif
         }
     }
 }

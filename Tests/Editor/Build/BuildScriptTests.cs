@@ -128,117 +128,6 @@ namespace UnityEditor.AddressableAssets.Tests
                 Settings.RemoveAssetEntry(folderEntry);
             }
 
-#if !UNITY_2021_2_OR_NEWER
-            [Test]
-            public void CopiedStreamingAssetAreCorrectlyDeleted_DirectoriesWithoutImport()
-            {
-                var context = new AddressablesDataBuilderInput(Settings);
-
-                int builderCount = 0;
-                for (int i = 0; i < Settings.DataBuilders.Count; i++)
-                {
-                    var builder = Settings.DataBuilders[i] as IDataBuilder;
-                    if (builder.CanBuildData<AddressablesPlayerBuildResult>())
-                    {
-                        builderCount++;
-
-                        // confirm that StreamingAssets does not exists before the test
-                        Assert.IsFalse(Directory.Exists("Assets/StreamingAssets"));
-                        builder.BuildData<AddressablesPlayerBuildResult>(context);
-
-                        Assert.IsTrue(Directory.Exists(Addressables.BuildPath));
-                        AddressablesPlayerBuildProcessor.CopyTemporaryPlayerBuildData();
-                        builder.ClearCachedData();
-
-                        Assert.IsTrue(Directory.Exists(Addressables.PlayerBuildDataPath));
-                        AddressablesPlayerBuildProcessor.CleanTemporaryPlayerBuildData();
-                        Assert.IsFalse(Directory.Exists(Addressables.PlayerBuildDataPath));
-                        Assert.IsFalse(Directory.Exists("Assets/StreamingAssets"));
-                    }
-                }
-
-                Assert.IsTrue(builderCount > 0);
-            }
-
-            [Test]
-            public void CopiedStreamingAssetAreCorrectlyDeleted_MetaFilesWithImport()
-            {
-                var context = new AddressablesDataBuilderInput(Settings);
-
-                int builderCount = 0;
-                for (int i = 0; i < Settings.DataBuilders.Count; i++)
-                {
-                    var builder = Settings.DataBuilders[i] as IDataBuilder;
-                    if (builder.CanBuildData<AddressablesPlayerBuildResult>())
-                    {
-                        builderCount++;
-
-                        // confirm that StreamingAssets does not exists before the test
-                        DirectoryUtility.DeleteDirectory(Application.streamingAssetsPath, recursiveDelete: true);
-                        Assert.IsFalse(Directory.Exists("Assets/StreamingAssets"));
-                        builder.BuildData<AddressablesPlayerBuildResult>(context);
-
-                        Assert.IsTrue(Directory.Exists(Addressables.BuildPath));
-                        AddressablesPlayerBuildProcessor.CopyTemporaryPlayerBuildData();
-                        builder.ClearCachedData();
-
-                        // confirm that PlayerBuildDataPath is imported to AssetDatabase
-                        AssetDatabase.Refresh();
-                        Assert.IsTrue(Directory.Exists(Addressables.PlayerBuildDataPath));
-                        Assert.IsTrue(File.Exists(Addressables.PlayerBuildDataPath + ".meta"));
-                        string relativePath = Addressables.PlayerBuildDataPath.Replace(Application.dataPath, "Assets");
-                        Assert.IsTrue(AssetDatabase.IsValidFolder(relativePath), "Copied StreamingAssets folder was not importer as expected");
-
-                        AddressablesPlayerBuildProcessor.CleanTemporaryPlayerBuildData();
-                        Assert.IsFalse(Directory.Exists(Addressables.PlayerBuildDataPath));
-                        Assert.IsFalse(Directory.Exists("Assets/StreamingAssets"));
-                    }
-                }
-
-                Assert.IsTrue(builderCount > 0);
-            }
-
-            [Test]
-            public void CopiedStreamingAssetAreCorrectlyDeleted_WithExistingFiles()
-            {
-                var context = new AddressablesDataBuilderInput(Settings);
-
-                int builderCount = 0;
-                for (int i = 0; i < Settings.DataBuilders.Count; i++)
-                {
-                    var builder = Settings.DataBuilders[i] as IDataBuilder;
-                    if (builder.CanBuildData<AddressablesPlayerBuildResult>())
-                    {
-                        builderCount++;
-
-                        // confirm that StreamingAssets does not exists before the test
-                        DirectoryUtility.DeleteDirectory(Application.streamingAssetsPath, recursiveDelete: true);
-                        Assert.IsFalse(Directory.Exists("Assets/StreamingAssets"));
-
-                        // create StreamingAssets and an extra folder as existing content
-                        AssetDatabase.CreateFolder("Assets", "StreamingAssets");
-                        AssetDatabase.CreateFolder("Assets/StreamingAssets", "extraFolder");
-
-                        builder.BuildData<AddressablesPlayerBuildResult>(context);
-
-                        Assert.IsTrue(Directory.Exists(Addressables.BuildPath));
-                        AddressablesPlayerBuildProcessor.CopyTemporaryPlayerBuildData();
-                        builder.ClearCachedData();
-
-                        Assert.IsTrue(Directory.Exists(Addressables.PlayerBuildDataPath));
-                        AddressablesPlayerBuildProcessor.CleanTemporaryPlayerBuildData();
-                        Assert.IsFalse(Directory.Exists(Addressables.PlayerBuildDataPath));
-                        Assert.IsTrue(Directory.Exists("Assets/StreamingAssets"));
-                        Assert.IsTrue(Directory.Exists("Assets/StreamingAssets/extraFolder"));
-
-                        AssetDatabase.DeleteAsset("Assets/StreamingAssets");
-                    }
-                }
-
-                Assert.IsTrue(builderCount > 0);
-            }
-
-#else
             [Test]
             public void AddressablesBuildPlayerProcessor_IncludeAdditionalStreamingAssetsWhenExist()
             {
@@ -277,7 +166,6 @@ namespace UnityEditor.AddressableAssets.Tests
                 // cleanup
                 Directory.Delete(path, true);
             }
-#endif
         }
 
         [RequirePlatformSupport(BuildTarget.StandaloneWindows, BuildTarget.StandaloneWindows64)]
@@ -423,11 +311,12 @@ namespace UnityEditor.AddressableAssets.Tests
                     db.BuildData<AddressablesPlayerBuildResult>(context);
         }
 
-#if ENABLE_JSON_CATALOG
         // ADDR-1755
         [Test]
         public void WhenBundleLocalCatalogEnabled_BuildScriptPacked_DoesNotCreatePerformanceLogReport()
         {
+            WithEnableJsonCatalog(true, () =>
+            {
             string logPath = $"Library/com.unity.addressables/aa/{PlatformMappingService.GetPlatformPathSubFolder()}/buildlogtep.json";
 
             if (File.Exists(logPath))
@@ -442,8 +331,8 @@ namespace UnityEditor.AddressableAssets.Tests
 
             var res = db.BuildData<AddressablesPlayerBuildResult>(context);
             Assert.IsFalse(File.Exists(logPath));
+            });
         }
-#endif
 
         [Test]
         public void Build_WithDeletedAsset_Succeeds()
@@ -483,18 +372,19 @@ namespace UnityEditor.AddressableAssets.Tests
             var context = new AddressablesDataBuilderInput(Settings);
 
             AddressableAssetEntry entry = Settings.CreateOrMoveEntry(m_AssetGUID, Settings.DefaultGroup);
+            LogAssert.Expect(LogType.Error, $"Address '[test]' cannot contain '[ ]'.");
             entry.address = "[test]";
-            LogAssert.Expect(LogType.Error, $"Address '{entry.address}' cannot contain '[ ]'.");
+
             foreach (IDataBuilder db in Settings.DataBuilders)
             {
                 if (db.GetType() == typeof(BuildScriptFastMode) || db.GetType() == typeof(BuildScriptPackedPlayMode))
                     continue;
 
+                LogAssert.Expect(LogType.Exception, $"Exception: Address '{entry.address}' cannot contain '[ ]'.");
                 if (db.CanBuildData<AddressablesPlayerBuildResult>())
                     db.BuildData<AddressablesPlayerBuildResult>(context);
                 else if (db.CanBuildData<AddressablesPlayModeBuildResult>())
                     db.BuildData<AddressablesPlayModeBuildResult>(context);
-                LogAssert.Expect(LogType.Error, "Address '[test]' cannot contain '[ ]'.");
             }
 
             Settings.RemoveAssetEntry(m_AssetGUID, false);
@@ -520,13 +410,13 @@ namespace UnityEditor.AddressableAssets.Tests
                     db.GetType() == typeof(BuildScriptPackedPlayMode))
                     continue;
 
+                LogAssert.Expect(LogType.Exception,
+                    $"Exception: Cannot recognize file type for entry located at 'Assets/{GetType()}_Tests/fake.file'. Asset import failed for using an unsupported file type.");
+
                 if (db.CanBuildData<AddressablesPlayerBuildResult>())
                     db.BuildData<AddressablesPlayerBuildResult>(context);
                 else if (db.CanBuildData<AddressablesPlayModeBuildResult>())
                     db.BuildData<AddressablesPlayModeBuildResult>(context);
-
-                LogAssert.Expect(LogType.Error,
-                    $"Cannot recognize file type for entry located at 'Assets/{GetType()}_Tests/fake.file'. Asset import failed for using an unsupported file type.");
             }
 
             Settings.RemoveAssetEntry(guid, false);
@@ -554,6 +444,9 @@ namespace UnityEditor.AddressableAssets.Tests
                 if (db.GetType() == typeof(BuildScriptFastMode) || db.GetType() == typeof(BuildScriptPackedPlayMode))
                     continue;
 
+                LogAssert.Expect(LogType.Warning, new Regex($".*{path}.*ignored"));
+                LogAssert.Expect(LogType.Warning, new Regex($".*{path}.*stripped"));
+
                 if (db.CanBuildData<AddressablesPlayerBuildResult>())
                 {
                     var res = db.BuildData<AddressablesPlayerBuildResult>(context);
@@ -567,8 +460,6 @@ namespace UnityEditor.AddressableAssets.Tests
                     Assert.IsTrue(string.IsNullOrEmpty(res.Error));
                 }
 
-                LogAssert.Expect(LogType.Warning, new Regex($".*{path}.*ignored"));
-                LogAssert.Expect(LogType.Warning, new Regex($".*{path}.*stripped"));
             }
 
             Settings.RemoveAssetEntry(guid, false);

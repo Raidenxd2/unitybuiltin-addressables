@@ -7,8 +7,10 @@ using UnityEditor.AddressableAssets.Build;
 using UnityEditor.AddressableAssets.GUI;
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.Build;
+using UnityEditor.Build.Content;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
+using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 
 /// <summary>
 /// Maintains Addresssables build data when processing a player build.
@@ -81,9 +83,9 @@ public class AddressablesPlayerBuildProcessor : BuildPlayerProcessor
 
     internal static void PrepareForPlayerbuild(AddressableAssetSettings settings, BuildPlayerContext buildPlayerContext, bool buildAddressables)
     {
+        AddressablesPlayerBuildResult result = null;
         if (settings != null && buildAddressables)
         {
-            AddressablesPlayerBuildResult result;
             if (BuildAddressablesOverride != null)
             {
                 try
@@ -122,6 +124,49 @@ public class AddressablesPlayerBuildProcessor : BuildPlayerProcessor
             File.Copy(buildPath, projectPath, true);
             AssetDatabase.ImportAsset(projectPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.DontDownloadFromCacheServer);
         }
+
+#if ENABLE_CONTENT_DIRECTORIES
+        if (buildPlayerContext == null)
+            return;
+
+        // if addressables build performed during player build, retrieve metadata locations using buildSessionGUID
+        if (result != null)
+        {
+            foreach (var buildResult in result.ContentDirectoryBuildResults)
+            {
+                if (BuildHistory.TryGetBuildReportDirectory(buildResult.BuildSessionGUID, out string buildReportDirectory)
+                    && !string.IsNullOrEmpty(buildReportDirectory))
+                {
+                    buildPlayerContext.AddPreviousBuildReportDirectory(buildReportDirectory);
+                }
+            }
+        }
+
+        // if no addressables build performed during player build, try to retrieve metadata path from content directory build path
+        else if (settings != null)
+        {
+            ContentDirectoryGroupSchema contentDirectoryGroupSchema = null;
+            foreach(var group in settings.groups)
+            {
+                // Require an enabled schema; a converted-back group keeps a disabled ContentDirectoryGroupSchema
+                // whose build path no longer reflects a real Content Directory build.
+                var schema = group.GetSchema<ContentDirectoryGroupSchema>();
+                if (schema != null && schema.IsEnabled)
+                {
+                    contentDirectoryGroupSchema = schema;
+                    break;
+                }
+            }
+
+            if (contentDirectoryGroupSchema != null && BuildHistory.TryGetBuildSummaryForOutputPath(contentDirectoryGroupSchema.BuildPath.GetValue(settings), out var buildSummary) &&
+                BuildHistory.TryGetBuildReportDirectory(buildSummary.BuildSessionGUID, out var buildReportDirectory) &&
+                !string.IsNullOrEmpty(buildReportDirectory))
+            {
+                buildPlayerContext.AddPreviousBuildReportDirectory(buildReportDirectory);
+            }
+
+        }
+#endif
     }
 
     static AddressablesPlayerBuildResult DefaultBuild(AddressableAssetSettings settings, BuildPlayerContext buildPlayerContext)
@@ -143,7 +188,8 @@ public class AddressablesPlayerBuildProcessor : BuildPlayerProcessor
         if (defaultNewBuildMenu != null)
         {
             AddressableAssetsSettingsGroupEditor.BuildMenuContext context = new AddressableAssetsSettingsGroupEditor.BuildMenuContext()
-                { buildScriptIndex = -1, BuildMenu = defaultNewBuildMenu, Settings = settings };
+
+            { buildScriptIndex = -1, BuildMenu = defaultNewBuildMenu, Settings = settings };
             return AddressableAssetsSettingsGroupEditor.BuildAddressablesWithResult(context, input);
         }
         else

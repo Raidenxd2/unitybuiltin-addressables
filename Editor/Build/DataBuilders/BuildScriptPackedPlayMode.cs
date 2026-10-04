@@ -1,8 +1,10 @@
 using System;
 using System.IO;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.AddressableAssets.Initialization;
+using UnityEditor.AddressableAssets.Settings;
 
 namespace UnityEditor.AddressableAssets.Build.DataBuilders
 {
@@ -10,6 +12,7 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
     /// Uses data built by BuildScriptPacked class.  This script just sets up the correct variables and runs.
     /// </summary>
     [CreateAssetMenu(fileName = "BuildScriptPackedPlayMode.asset", menuName = "Addressables/Content Builders/Use Existing Build (requires built groups)")]
+    [AddressablesHelpURL("Builds.html")]
     public class BuildScriptPackedPlayMode : BuildScriptBase
     {
         /// <inheritdoc />
@@ -84,8 +87,8 @@ namespace UnityEditor.AddressableAssets.Build.DataBuilders
 
             //TODO: detect if the data that does exist is out of date..
             var runtimeSettingsPath = "{UnityEngine.AddressableAssets.Addressables.RuntimePath}/settings.json";
-            PlayerPrefs.SetString(Addressables.kAddressablesRuntimeDataPath, runtimeSettingsPath);
-            PlayerPrefs.SetString(Addressables.kAddressablesRuntimeBuildLogPath, buildLogsPath);
+            SessionState.SetString(Addressables.kAddressablesRuntimeDataPath, runtimeSettingsPath);
+            SessionState.SetString(Addressables.kAddressablesRuntimeBuildLogPath, buildLogsPath);
             IDataBuilderResult res = new AddressablesPlayModeBuildResult() {OutputPath = settingsPath, Duration = timer.Elapsed.TotalSeconds};
             m_DataBuilt = true;
             return (TResult)res;

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -237,6 +238,62 @@ namespace UnityEditor.AddressableAssets.Tests
         }
 
         [Test]
+        public void ClearRuntimeTypeCache_RestoresDefaultMappings()
+        {
+            // Cache a type that will be evicted on clear
+            AddressableAssetUtility.MapEditorTypeToRuntimeType(typeof(UnityEditor.AssetImporter), false);
+
+            AddressableAssetUtility.ClearRuntimeTypeCache();
+
+            // Built-in defaults must still map correctly after a clear
+            Assert.AreEqual(
+                typeof(RuntimeAnimatorController),
+                AddressableAssetUtility.MapEditorTypeToRuntimeType(typeof(UnityEditor.Animations.AnimatorController), false));
+            Assert.AreEqual(
+                typeof(UnityEngine.ResourceManagement.ResourceProviders.SceneInstance),
+                AddressableAssetUtility.MapEditorTypeToRuntimeType(typeof(UnityEditor.SceneAsset), false));
+
+            // Non-editor runtime types should still pass through unchanged
+            Assert.AreEqual(
+                typeof(UnityEngine.Vector3),
+                AddressableAssetUtility.MapEditorTypeToRuntimeType(typeof(UnityEngine.Vector3), false));
+        }
+
+        [Test]
+        public void MapEditorTypeToRuntimeType_ConcurrentAccess_DoesNotThrow()
+        {
+            // Regression: plain Dictionary.Add races under concurrency.
+            // ConcurrentDictionary must not throw or corrupt.
+            AddressableAssetUtility.ClearRuntimeTypeCache();
+
+            var types = new[]
+            {
+                typeof(UnityEngine.Vector3),
+                typeof(UnityEngine.GameObject),
+                typeof(UnityEngine.Texture2D),
+                typeof(UnityEditor.Animations.AnimatorController),
+                typeof(UnityEditor.SceneAsset),
+                typeof(UnityEditor.AssetImporter),
+                typeof(UnityEngine.AudioClip),
+                typeof(UnityEngine.Sprite),
+            };
+
+            Assert.DoesNotThrow(() =>
+            {
+                System.Threading.Tasks.Parallel.For(0, 200, i =>
+                {
+                    var t = types[i % types.Length];
+                    AddressableAssetUtility.MapEditorTypeToRuntimeType(t, false);
+                });
+            });
+
+            // Spot-check correctness after concurrent writes
+            Assert.AreEqual(
+                typeof(RuntimeAnimatorController),
+                AddressableAssetUtility.MapEditorTypeToRuntimeType(typeof(UnityEditor.Animations.AnimatorController), false));
+        }
+
+        [Test]
         public void SafeMoveResourcesToGroup_ResourcesMovedToNewFolderAndGroup()
         {
             var folderPath = AssetDatabase.GUIDToAssetPath(AssetDatabase.CreateFolder(TestFolder, "Resources"));
@@ -393,9 +450,8 @@ namespace UnityEditor.AddressableAssets.Tests
         public void GetPackageVersion_ReturnsAValidVersion()
         {
             string v = AddressableAssetUtility.GetVersionFromPackageData();
-            Assert.IsTrue(v.StartsWith("2."), $"Failed to get a valid version from package.json data. Expected 2.X but was {v}");
-            Assert.IsTrue(v.Split('.').Length == 2,
-                $"Format from GetVersionFromPackageData, produced {v} which is incorrectly formatted");
+            Assert.IsTrue(Regex.IsMatch(v, @"^\d+\.\d+$"),
+                $"Failed to get a valid version from package.json data. Expected major.minor from package.json (e.g. 3.0) but was {v}");
         }
 
         [Test]

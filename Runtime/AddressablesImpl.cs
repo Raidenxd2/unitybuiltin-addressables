@@ -11,7 +11,6 @@ using UnityEngine.AddressableAssets.ResourceProviders;
 using UnityEngine.Networking;
 using UnityEngine.ResourceManagement;
 using UnityEngine.ResourceManagement.AsyncOperations;
-using UnityEngine.ResourceManagement.Exceptions;
 using UnityEngine.ResourceManagement.ResourceLocations;
 using UnityEngine.ResourceManagement.ResourceProviders;
 using UnityEngine.ResourceManagement.Util;
@@ -19,7 +18,7 @@ using UnityEngine.SceneManagement;
 
 namespace UnityEngine.AddressableAssets
 {
-    internal class AddressablesImpl : IEqualityComparer<IResourceLocation>
+    internal class AddressablesImpl : IEqualityComparer<IResourceLocation>, IDisposable
     {
         ResourceManager m_ResourceManager;
         IInstanceProvider m_InstanceProvider;
@@ -80,11 +79,39 @@ namespace UnityEngine.AddressableAssets
         {
             m_ResourceManager = new ResourceManager(alloc);
             SceneManager.sceneUnloaded += OnSceneUnloaded;
+#if ENABLE_CONTENT_DIRECTORIES
+            // The Content Directory providers live in the lower-level ResourceManager assembly and
+            // cannot reference this assembly's runtime-property evaluator directly, so hand them the
+            // resolver they need to expand placeholders in the stored Content Directory load paths.
+            ContentDirectoryMountManager.PathResolver = AddressablesRuntimeProperties.EvaluateString;
+#endif
         }
 
-        internal void ReleaseSceneManagerOperation()
+        public void Dispose()
         {
             SceneManager.sceneUnloaded -= OnSceneUnloaded;
+
+            // This will unload every addressable reference loaded in memory.
+            // It has to work on a copy of the list given the Release will change the list itself.
+            var handles = new List<AsyncOperationHandle>(m_resultToHandle.Values);
+            foreach (var handle in handles)
+            {
+                if (handle.IsValid())
+                    m_ResourceManager.Release(handle);
+            }
+            handles = new List<AsyncOperationHandle>(m_SceneInstances);
+            foreach (var handle in handles)
+            {
+                if(handle.IsValid())
+                    m_ResourceManager.Release(handle);
+            }
+
+#if ENABLE_CONTENT_DIRECTORIES
+            // Content Directories stay mounted for the lifetime of the system; unmount them all here.
+            ContentDirectoryMountManager.UnmountAll();
+#endif
+
+            m_ResourceManager.Dispose();
         }
 
         public Func<IResourceLocation, string> InternalIdTransformFunc
@@ -259,12 +286,24 @@ namespace UnityEngine.AddressableAssets
             m_ResourceLocators.Clear();
         }
 
+        private Type ResolveArrayTypes(Type t)
+        {
+            if (t == null)
+                return null;
+            if (t.IsArray)
+                t = t.GetElementType();
+            else if (t.IsGenericType && typeof(IList<>) == t.GetGenericTypeDefinition())
+                t = t.GetGenericArguments()[0];
+            return t;
+        }
+
         internal bool GetResourceLocations(object key, Type type, out IList<IResourceLocation> locations)
         {
             if (type == null && (key is AssetReference))
                 type = (key as AssetReference).SubObjectType;
 
             key = EvaluateKey(key);
+            type = ResolveArrayTypes(type);
 
             locations = null;
             HashSet<IResourceLocation> current = null;
@@ -370,6 +409,7 @@ namespace UnityEngine.AddressableAssets
             }
 
             hasStartedInitialization = true;
+            TypeNameResolver.Initialize();
             if (m_InitializationOperation.IsValid())
                 return m_InitializationOperation;
             //these need to be referenced in order to prevent stripping on IL2CPP platforms.
@@ -427,7 +467,7 @@ namespace UnityEngine.AddressableAssets
         {
             var settingsPath =
 #if UNITY_EDITOR
-                PlayerPrefs.GetString(Addressables.kAddressablesRuntimeDataPath, RuntimePath + "/settings.json");
+                UnityEditor.SessionState.GetString(Addressables.kAddressablesRuntimeDataPath, RuntimePath + "/settings.json");
 #else
                 RuntimePath + "/settings.json";
 #endif
@@ -439,7 +479,7 @@ namespace UnityEngine.AddressableAssets
         {
             var settingsPath =
 #if UNITY_EDITOR
-                PlayerPrefs.GetString(Addressables.kAddressablesRuntimeDataPath, RuntimePath + "/settings.json");
+                UnityEditor.SessionState.GetString(Addressables.kAddressablesRuntimeDataPath, RuntimePath + "/settings.json");
 #else
                 RuntimePath + "/settings.json";
 #endif
@@ -454,12 +494,55 @@ namespace UnityEngine.AddressableAssets
 
         public ResourceLocationBase CreateCatalogLocationWithHashDependencies<T>(string catalogLocation) where T : IResourceProvider
         {
-#if ENABLE_JSON_CATALOG
-            string hashFilePath = catalogLocation.Replace(".json", ".hash");
-#else
-            string hashFilePath = catalogLocation.Replace(".bin", ".hash");
-#endif
+            string hashFilePath = CatalogUtilities.GetHashFilePath(catalogLocation);
             return CreateCatalogLocationWithHashDependencies<T>(catalogLocation, hashFilePath);
+        }
+
+        internal ResourceLocationBase CreateCatalogLocationWithHashDependencies(string catalogLocation, Type providerType)
+        {
+            string hashFilePath = CatalogUtilities.GetHashFilePath(catalogLocation);
+            var catalogLoc = new ResourceLocationBase(catalogLocation, catalogLocation, providerType.FullName, typeof(IResourceLocator))
+            {
+                Data = new ProviderLoadRequestOptions()
+                {
+                    IgnoreFailures = false,
+                    WebRequestTimeout = CatalogRequestsTimeout
+                }
+            };
+
+            if (!string.IsNullOrEmpty(hashFilePath))
+            {
+                ProviderLoadRequestOptions hashOptions = new ProviderLoadRequestOptions()
+                {
+                    IgnoreFailures = true,
+                    WebRequestTimeout = CatalogRequestsTimeout
+                };
+
+                string tmpPath = hashFilePath;
+                if (ResourceManagerConfig.IsPathRemote(hashFilePath))
+                {
+                    tmpPath = CatalogUtilities.GetCacheKeySource(hashFilePath);
+                }
+                var hashResourceLocation = new ResourceLocationBase(hashFilePath, hashFilePath, typeof(TextDataProvider).FullName, typeof(string))
+                {
+                    Data = hashOptions.Copy()
+                };
+                catalogLoc.Dependencies.Add(hashResourceLocation);
+
+#if UNITY_SWITCH || UNITY_SWITCH2
+                string cacheHashFilePath = hashFilePath;
+#else
+                string cacheHashFilePath = ResolveInternalId(kCacheDataFolder + tmpPath.GetHashCode() + ".hash");
+#endif
+                var cacheResourceLocation = new ResourceLocationBase(cacheHashFilePath, cacheHashFilePath, typeof(TextDataProvider).FullName, typeof(string))
+                {
+                    Data = hashOptions.Copy()
+                };
+                catalogLoc.Dependencies.Add(cacheResourceLocation);
+                catalogLoc.Dependencies.Add(cacheResourceLocation);
+            }
+
+            return catalogLoc;
         }
 
         public ResourceLocationBase CreateCatalogLocationWithHashDependencies<T>(string catalogPath, string hashFilePath) where T : IResourceProvider
@@ -484,7 +567,7 @@ namespace UnityEngine.AddressableAssets
                 string tmpPath = hashFilePath;
                 if (ResourceManagerConfig.IsPathRemote(hashFilePath))
                 {
-                    tmpPath = ResourceManagerConfig.StripQueryParameters(hashFilePath);
+                    tmpPath = CatalogUtilities.GetCacheKeySource(hashFilePath);
                 }
                 // remote hash file location
                 var hashResourceLocation = new ResourceLocationBase(hashFilePath, hashFilePath, typeof(TextDataProvider).FullName, typeof(string))
@@ -496,7 +579,8 @@ namespace UnityEngine.AddressableAssets
 #if UNITY_SWITCH || UNITY_SWITCH2
                 string cacheHashFilePath = hashFilePath; // ResourceLocationBase does not allow empty string id
 #else
-                // The file name of the local cached catalog + hash file is the hash code of the remote hash path, without query parameters (if any).
+                // The file name of the local cached catalog + hash file is the hash code of the
+                // remote hash path, with the query string dropped apart from a file name in it.
                 string cacheHashFilePath = ResolveInternalId(kCacheDataFolder + tmpPath.GetHashCode() + ".hash");
 #endif
                 // cached hash file location
@@ -525,7 +609,21 @@ namespace UnityEngine.AddressableAssets
 
         public AsyncOperationHandle<IResourceLocator> LoadContentCatalogAsync(string catalogPath, bool autoReleaseHandle = true, string providerSuffix = null)
         {
-            var catalogLoc = CreateCatalogLocationWithHashDependencies<ContentCatalogProvider>(catalogPath);
+            var ext = CatalogUtilities.GetCatalogExtension(catalogPath);
+            ContentCatalogProvider catalogProvider = null;
+            foreach (var p in ResourceManager.ResourceProviders)
+            {
+                if (p is ContentCatalogProvider ccp &&
+                    string.Equals(ccp.CatalogExtension, ext, StringComparison.OrdinalIgnoreCase))
+                {
+                    catalogProvider = ccp;
+                    break;
+                }
+            }
+            if (catalogProvider == null)
+                return ResourceManager.CreateCompletedOperationWithException<IResourceLocator>(default(IResourceLocator), new InvalidOperationException(
+                    $"No catalog provider registered for extension '{ext}'."));
+            var catalogLoc = CreateCatalogLocationWithHashDependencies(catalogPath, catalogProvider.GetType());
             if (ShouldChainRequest)
                 return ResourceManager.CreateChainOperation(ChainOperation, op => LoadContentCatalogAsync(catalogPath, autoReleaseHandle, providerSuffix));
             var handle = Initialization.InitializationOperation.LoadContentCatalog(this, catalogLoc, providerSuffix);
@@ -585,11 +683,7 @@ namespace UnityEngine.AddressableAssets
             key = EvaluateKey(key);
 
             IList<IResourceLocation> locs;
-            var t = typeof(TObject);
-            if (t.IsArray)
-                t = t.GetElementType();
-            else if (t.IsGenericType && typeof(IList<>) == t.GetGenericTypeDefinition())
-                t = t.GetGenericArguments()[0];
+            var t = ResolveArrayTypes(typeof(TObject));
             foreach (var locatorInfo in m_ResourceLocators)
             {
                 var locator = locatorInfo.Locator;
@@ -878,11 +972,7 @@ namespace UnityEngine.AddressableAssets
                                                                          $"be setup using CreateCatalogLocationWithHashDependencies");
 
             var internalIdHash = catalogLoc.Dependencies[(int)ContentCatalogProvider.DependencyHashIndex.Remote].InternalId;
-#if ENABLE_JSON_CATALOG
-            var internalIdCat = internalIdHash.Replace(".hash", ".json");
-#else
-            var internalIdCat = internalIdHash.Replace(".hash", ".bin");
-#endif
+            var internalIdCat = CatalogUtilities.GetCatalogFilePath(internalIdHash, CatalogUtilities.GetCatalogExtension(catalogLoc.InternalId));
             var uwr = new UnityWebRequest(internalIdCat, UnityWebRequest.kHttpVerbHEAD);
             AsyncOperationBase<UnityWebRequest> uwrAsyncOp = new UnityWebRequestOperation(uwr);
 
@@ -916,38 +1006,79 @@ namespace UnityEngine.AddressableAssets
             if (ShouldChainRequest)
                 return TrackHandle(GetDownloadSizeWithChain(ChainOperation, keys));
 
-            List<IResourceLocation> allLocations = new List<IResourceLocation>();
+            var sizeLocations = new HashSet<IResourceLocation>(new ResourceLocationComparer());
+
+            // A catalog's size is a separate remote request, so it cannot be summed
+            // with content sizes. Collected here and handled after the loop.
+            List<IResourceLocation> catalogLocations = null;
+            bool requestedContent = false;
+
             foreach (object key in keys)
             {
-                IList<IResourceLocation> locations;
-                if (key is IList<IResourceLocation>)
-                    locations = key as IList<IResourceLocation>;
-                else if (key is IResourceLocation)
+                if (key is IResourceLocation location)
                 {
-                    foreach (var locator in m_ResourceLocators)
-                    {
-                        if (locator.CatalogLocation == key as IResourceLocation)
-                            return ComputeCatalogSizeWithChain(key as IResourceLocation);
-                    }
-
-                    locations = new List<IResourceLocation>(1)
-                    {
-                        key as IResourceLocation
-                    };
+                    GatherSizeCalculationLocations(location, sizeLocations, ref catalogLocations, ref requestedContent);
+                    continue;
                 }
-                else if (!GetResourceLocations(key, typeof(object), out locations))
+
+                if (key is IList<IResourceLocation> locationList)
+                {
+                    foreach (var loc in locationList)
+                        GatherSizeCalculationLocations(loc, sizeLocations, ref catalogLocations, ref requestedContent);
+                    continue;
+                }
+
+                if (!GetResourceLocations(key, typeof(object), out IList<IResourceLocation> locations))
                     return ResourceManager.CreateCompletedOperationWithException<long>(0, new InvalidKeyException(key, typeof(object), this));
 
-                foreach (var loc in locations)
-                {
-                    if (loc.HasDependencies)
-                        allLocations.AddRange(loc.Dependencies);
-                }
+                requestedContent = true;
+                GatherLocations(locations, sizeLocations, LocationGatherFilter.SizeBearing);
+            }
+
+            if (catalogLocations != null)
+            {
+                if (catalogLocations.Count == 1 && !requestedContent)
+                    return ComputeCatalogSizeWithChain(catalogLocations[0]);
+
+                foreach (var catalogLoc in catalogLocations)
+                    LogWarning($"{nameof(GetDownloadSizeAsync)} ignored catalog location '{catalogLoc.InternalId}'. A catalog's size is a separate remote request; ask for it on its own.");
             }
 
             GetDownloadSizeOperation downloadSizeOp = new GetDownloadSizeOperation();
-            downloadSizeOp.Init(allLocations.Distinct(new ResourceLocationComparer()), ResourceManager);
+            downloadSizeOp.Init(sizeLocations, ResourceManager);
             return ResourceManager.StartOperation(downloadSizeOp, default);
+        }
+
+        void GatherSizeCalculationLocations(IResourceLocation location, HashSet<IResourceLocation> results,
+            ref List<IResourceLocation> catalogLocations, ref bool requestedContent)
+        {
+            if (IsCatalogLocation(location))
+            {
+                if (catalogLocations == null)
+                    catalogLocations = new List<IResourceLocation>();
+
+                catalogLocations.Add(location);
+                return;
+            }
+
+            requestedContent = true;
+            GatherLocation(location, results, LocationGatherFilter.SizeBearing);
+        }
+
+        bool IsCatalogLocation(IResourceLocation location)
+        {
+            // A locator with no remote catalog has a null CatalogLocation, so a null
+            // element in a caller-supplied list would otherwise match it.
+            if (location == null)
+                return false;
+
+            foreach (var locator in m_ResourceLocators)
+            {
+                if (locator.CatalogLocation == location)
+                    return true;
+            }
+
+            return false;
         }
 
         AsyncOperationHandle DownloadDependenciesAsyncWithChain(AsyncOperationHandle dep, object key, bool autoReleaseHandle)
@@ -964,24 +1095,58 @@ namespace UnityEngine.AddressableAssets
                 locations[i] = new DownloadOnlyLocation(locations[i]);
         }
 
+        enum LocationGatherFilter
+        {
+            /// <summary>Locations the download path can fetch.</summary>
+            Downloadable,
+
+            /// <summary>Locations that report a download size.</summary>
+            SizeBearing
+        }
+
+        internal static bool IsDownloadableLocation(IResourceLocation loc)
+        {
+            return typeof(IAssetBundleResource).IsAssignableFrom(loc.ResourceType);
+        }
+
+        static bool HasDownloadSize(IResourceLocation loc)
+        {
+            return loc.Data is ILocationSizeData;
+        }
+
+        static bool IncludeInGather(IResourceLocation loc, LocationGatherFilter filter)
+        {
+            switch (filter)
+            {
+                case LocationGatherFilter.Downloadable: return IsDownloadableLocation(loc);
+                case LocationGatherFilter.SizeBearing: return HasDownloadSize(loc);
+                default: return false;
+            }
+        }
+
+        static void GatherLocation(IResourceLocation loc, HashSet<IResourceLocation> results, LocationGatherFilter filter)
+        {
+            if (IncludeInGather(loc, filter))
+                results.Add(loc);
+
+            if (loc.HasDependencies)
+            {
+                foreach (var dep in loc.Dependencies)
+                    if (IncludeInGather(dep, filter))
+                        results.Add(dep);
+            }
+        }
+
+        static void GatherLocations(IList<IResourceLocation> locations, HashSet<IResourceLocation> results, LocationGatherFilter filter)
+        {
+            foreach (var loc in locations)
+                GatherLocation(loc, results, filter);
+        }
+
         static List<IResourceLocation> GatherDependenciesFromLocations(IList<IResourceLocation> locations)
         {
             var locHash = new HashSet<IResourceLocation>(new ResourceLocationComparer());
-            foreach (var loc in locations)
-            {
-                if (loc.ResourceType == typeof(IAssetBundleResource))
-                {
-                    locHash.Add(loc);
-                }
-
-                if (loc.HasDependencies)
-                {
-                    foreach (var dep in loc.Dependencies)
-                        if (dep.ResourceType == typeof(IAssetBundleResource))
-                            locHash.Add(dep);
-                }
-            }
-
+            GatherLocations(locations, locHash, LocationGatherFilter.Downloadable);
             return new List<IResourceLocation>(locHash);
         }
 
@@ -1111,7 +1276,7 @@ namespace UnityEngine.AddressableAssets
 
         internal void AutoReleaseHandleOnTypelessCompletion<TObject>(AsyncOperationHandle<TObject> handle)
         {
-            handle.CompletedTypeless += op => op.Release();
+            handle.ReleaseHandleOnCompletion();
         }
 
         public AsyncOperationHandle<bool> ClearDependencyCacheAsync(object key, bool autoReleaseHandle)
